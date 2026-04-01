@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "thermoflow"
+version = "0.2.0"
+description = "Flow cytometry protein stability analysis — PRI kinetics, gating, and publication-quality figures"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+keywords = ["flow cytometry", "protein stability", "PRI", "kinetics", "bioinformatics"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Intended Audience :: Science/Research",
+]
+dependencies = [
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "matplotlib>=3.7",
+    "scipy>=1.10",
+    "ipython>=8.0",
+    "ipywidgets>=7.6",
+    "flowio>=1.2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.urls]
+"Homepage" = "https://github.com/dzyla/ThermoFlow"
+"Bug Tracker" = "https://github.com/dzyla/ThermoFlow/issues"
+
+[tool.setuptools]
+# Install thermoflow_app.py as a top-level module so that
+# `from thermoflow_app import FlowExperiment` works after pip install.
+py-modules = ["thermoflow_app"]
