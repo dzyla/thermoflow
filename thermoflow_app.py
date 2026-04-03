@@ -624,6 +624,34 @@ class FlowExperiment:
             self.clear_cache()
             print("🧹 All gates cleared. Data reset to 'raw'.")
 
+    def rename_sample(self, old_name: str, new_name: str):
+        """Rename a sample across all populations and PRI result tables.
+
+        Args:
+            old_name: Current sample name (as it appears in the data).
+            new_name: Replacement name.
+        """
+        if old_name == new_name:
+            return
+        renamed_any = False
+        for pop_name, df in self.populations.items():
+            if 'sample' in df.columns and old_name in df['sample'].values:
+                self.populations[pop_name] = df.copy()
+                self.populations[pop_name]['sample'] = df['sample'].replace(old_name, new_name)
+                renamed_any = True
+        for attr in ('pri_table', 'pri_fits_abs', 'pri_fits_norm'):
+            tbl = getattr(self, attr)
+            if not tbl.empty and 'sample' in tbl.columns and old_name in tbl['sample'].values:
+                setattr(self, attr, tbl.copy())
+                getattr(self, attr)['sample'] = tbl['sample'].replace(old_name, new_name)
+                renamed_any = True
+        if self.pri_control_sample == old_name:
+            self.pri_control_sample = new_name
+        if renamed_any:
+            print(f"✅ Renamed sample '{old_name}' → '{new_name}'")
+        else:
+            print(f"⚠️ Sample '{old_name}' not found in any population or PRI table.")
+
     def apply_gateset(self, gateset: Union[str, GateSet], parent_pop: str = None, new_pop_name: str = None):
         # Allow passing the gateset name as a string
         if isinstance(gateset, str):
@@ -913,6 +941,16 @@ class FlowExperiment:
             print("⚠️ No PRI data available to export. Run run_pri_analysis first.")
             
     def run_gating_ui(self, parent_pop: str = None, new_pop_name: str = None):
+        # Switch to interactive widget backend when running inside Jupyter/IPython.
+        # This is the programmatic equivalent of `%matplotlib widget` and avoids
+        # having to put magic commands in the notebook before calling this method.
+        try:
+            ip = get_ipython()  # type: ignore[name-defined]
+            if ip is not None and 'ipympl' not in mpl.get_backend().lower():
+                ip.run_line_magic('matplotlib', 'widget')
+        except Exception:
+            pass
+
         target_parent = parent_pop or self.active_pop
         input_df = self.get_data(target_parent)
         if input_df.empty: return
@@ -1308,11 +1346,16 @@ class FlowExperiment:
         y = plot_df[val_col].values
 
         if err_col in plot_df.columns:
-            yerr = plot_df[err_col].fillna(0).values
+            yerr_sym = plot_df[err_col].fillna(0).values
             if ignore_large_errors:
-                yerr = np.where(yerr > np.abs(y), np.nan, yerr)
+                yerr_sym = np.where(yerr_sym > np.abs(y), np.nan, yerr_sym)
         else:
-            yerr = np.zeros_like(y)
+            yerr_sym = np.zeros_like(y)
+
+        # Clip lower error so bars never dip below zero — only show positive cap
+        yerr_lower = np.where(np.isfinite(yerr_sym), np.minimum(yerr_sym, np.maximum(y, 0.0)), 0.0)
+        yerr_upper = np.where(np.isfinite(yerr_sym), yerr_sym, 0.0)
+        yerr = np.array([yerr_lower, yerr_upper])
 
         # Color mapping — avoid deprecated cm.get_cmap in matplotlib >= 3.7
         try:
@@ -1647,10 +1690,10 @@ class FlowExperiment:
 
     # --- Analysis & PRI (with Error propagation, Residuals and Bootstrap CIs) ---
     # --- Analysis & PRI (with Error propagation, Residuals and Bootstrap CIs) ---
-    def run_pri_analysis(self, channel: str, control_sample: str, samples: list = None, 
+    def run_pri_analysis(self, channel: str, control_sample: str, samples: list = None,
                          pos_frac: float = 0.01, baseline_time: int = 0, pop_name: str = None,
                          n_bootstrap: int = 100, confidence: float = 0.95, ctrl_sample_list: list = None,
-                         reference_sample: str = None):
+                         reference_sample: str = None, threshold_log: float = None):
         """Enhanced PRI analysis with bootstrap confidence intervals and optional reference normalization."""
         df = self.get_data(pop_name)
         if df.empty:
@@ -1684,7 +1727,12 @@ class FlowExperiment:
         print(f"✅ Using control sample '{valid_ctrl_name}' for PRI analysis thresholding.")
         ctrl = df.loc[df["sample"] == valid_ctrl_name].copy()
 
-        thr_log = float(np.quantile(np.log1p(_coerce_nonneg(ctrl[channel]).values), float(np.clip(1.0 - pos_frac, 0.0, 1.0))))
+        if threshold_log is not None:
+            thr_log = float(threshold_log)
+            print(f"✅ Using user-supplied threshold (log1p scale): {thr_log:.4f}")
+        else:
+            thr_log = float(np.quantile(np.log1p(_coerce_nonneg(ctrl[channel]).values), float(np.clip(1.0 - pos_frac, 0.0, 1.0))))
+            print(f"   Auto threshold from control top {pos_frac*100:.1f}% quantile: {thr_log:.4f} (log1p)")
         
         # 5. Calculate Reference Baseline if provided
         ref_pri_abs0 = None
@@ -2150,13 +2198,16 @@ class FlowExperiment:
         valid_fits = fits_df.dropna(subset=['t_half'])
         x = np.arange(len(valid_fits))
         y = valid_fits['t_half'].values
-        yerr = (valid_fits['t_half_err'].fillna(0).values
-                if 't_half_err' in valid_fits.columns else np.zeros_like(y))
+        yerr_sym = (valid_fits['t_half_err'].fillna(0).values
+                    if 't_half_err' in valid_fits.columns else np.zeros_like(y))
+        # Clip lower error so bars never go below zero
+        yerr_lower = np.minimum(yerr_sym, np.maximum(y, 0.0))
+        yerr_bar = np.array([yerr_lower, yerr_sym])
 
         cmap_bar = mpl.colormaps['viridis']
         bar_colors = cmap_bar(np.linspace(0.15, 0.85, max(len(valid_fits), 1)))
         bar_w = max(0.45, 0.6 - 0.008 * len(valid_fits))
-        ax_bar.bar(x, y, width=bar_w, yerr=yerr, capsize=4, color=bar_colors,
+        ax_bar.bar(x, y, width=bar_w, yerr=yerr_bar, capsize=4, color=bar_colors,
                    edgecolor='black', linewidth=1.0, alpha=0.92,
                    error_kw={'linewidth': 1.1, 'capthick': 1.1})
         ax_bar.set_xticks(x)
