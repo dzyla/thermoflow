@@ -2,6 +2,10 @@
 
 Flow cytometry analysis library for measuring protein thermal stability via the **Prefusion Retention Index (PRI)** — a fluorescence-decay kinetics assay.
 
+![version](https://img.shields.io/badge/version-0.3.0-blue)
+![Python](https://img.shields.io/badge/python-%3E%3D3.9-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+
 ## Install
 
 ```bash
@@ -21,6 +25,12 @@ pip install .
 > conda activate your_env
 > pip install git+https://github.com/dzyla/thermoflow.git
 > ```
+
+For interactive gating in Jupyter notebooks, also install `ipympl`:
+
+```bash
+pip install ipympl
+```
 
 ---
 
@@ -55,6 +65,10 @@ report.export_pdf("report.pdf")
 
 Launch the interactive widget to draw gates on any 2D scatter plot.
 Supports Rectangle, Polygon, and Ellipse gate types with undo/redo.
+
+> **No magic command needed.** `run_gating_ui` automatically switches matplotlib to
+> the interactive widget backend. Just call it directly — no `%matplotlib widget`
+> required in the notebook.
 
 ```python
 # Open the gating UI on the raw population, save result as 'cells'
@@ -124,6 +138,44 @@ exp.plot_density(
 
 ---
 
+## PRI analysis
+
+### Basic usage
+
+```python
+exp.run_pri_analysis('RL1-H', control_sample='Ctrl',
+                     pop_name='cells', reference_sample='Fwt')
+```
+
+### Custom threshold
+
+By default the positive/negative gate is set from the top `pos_frac` quantile of
+the control sample. Pass `threshold_log` to override with a fixed value in log1p
+space (the same scale shown on histogram x-axes):
+
+```python
+# Inspect where the gate should fall
+exp.plot_sliced_histogram('RL1-H', slice_by='sample', filter_col='time', filter_val=0)
+
+# Supply the gate position directly
+exp.run_pri_analysis('RL1-H', control_sample='Ctrl', threshold_log=5.5)
+```
+
+---
+
+## Sample management
+
+### Rename a sample
+
+If a sample name was typed incorrectly, rename it across all populations and PRI
+tables in one call:
+
+```python
+exp.rename_sample('FWT', 'Fwt')   # fixes a typo everywhere
+```
+
+---
+
 ## Full workflow example
 
 ```python
@@ -135,6 +187,9 @@ path = 'data/20260107/*.fcs'
 exp.load_fcs_files(path, dataset_id='Plate_1')
 
 experiment = re.search(r'(\d{6})', path).group(1)
+
+# Fix any sample name typos before analysis
+exp.rename_sample('FWT', 'Fwt')
 
 # Load previously saved gates and apply
 exp.load_gates('gates.json')
@@ -171,11 +226,14 @@ report.export_pdf('report.pdf')
 | Feature | Details |
 |---|---|
 | FCS loading | Multi-file, channel normalisation, NaN audit, load-report dict |
-| Interactive gating | ipywidgets UI — Rectangle, Polygon, Ellipse; undo/redo |
+| Interactive gating | ipywidgets UI — Rectangle, Polygon, Ellipse; undo/redo; auto widget backend |
 | Programmatic gates | Rectangle, Polygon, Ellipse, Threshold; boolean logic expressions |
 | Gate persistence | Save/load gatesets as JSON (`export_gates` / `load_gates`) |
 | Gate overlay | Overlay any gateset on density plots with per-gate event statistics |
 | PRI analysis | Global exponential fit, per-sample A/k/t½, bootstrap CIs, R², fit quality |
+| Custom threshold | `threshold_log` overrides auto control-quantile gate in `run_pri_analysis` |
+| Error bars | Asymmetric — lower cap clipped at zero, upper cap unaffected |
+| Sample rename | `rename_sample(old, new)` updates all populations and PRI tables atomically |
 | Figures | Nature/Science column widths, publication-ready axes, optional 95% CI bands |
 | Reports | Auto-generated HTML + PDF with density, histogram, and PRI panels |
 | Multiple datasets | `dataset=` kwarg on all plot methods; `FlowExperiment.datasets` property |
@@ -185,14 +243,18 @@ report.export_pdf('report.pdf')
 - Python ≥ 3.9
 - numpy, pandas, matplotlib, scipy
 - ipython, ipywidgets (Jupyter notebook display)
+- ipympl (interactive gating — `pip install ipympl`)
 - [flowio](https://github.com/whitews/FlowIO) (FCS file parsing)
 
 ## Running tests
 
 ```bash
-pip install pytest
-pytest tests/
+conda run -n your_env python tests/test_thermoflow.py
 ```
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for the full version history.
 
 ## License
 

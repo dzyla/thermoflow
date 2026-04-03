@@ -1,3 +1,5 @@
+__version__ = "0.3.0"
+
 import os
 import io
 import glob
