@@ -4,19 +4,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
+All Python commands must go through the conda environment — bare `python`/`pip` will fail with `ModuleNotFoundError`.
+
 ```bash
 # Install in editable/dev mode
-pip install -e ".[dev]"
+conda run -n e1_esm pip install -e ".[dev]"
 
-# Run all tests
-pytest tests/
-
-# Run tests directly (used in the test file comments)
-python tests/test_thermoflow.py
-
-# Run a single test section (the test file is a script, not pytest-style)
-# Tests print PASS/FAIL and exit with code 0/1
+# Run the test suite (plain script — prints PASS/FAIL, exits 0/1)
+conda run -n e1_esm python tests/test_thermoflow.py
 ```
+
+## Versioning
+
+When bumping the version, update **three places together**:
+1. `__version__` at the top of `thermoflow_app.py`
+2. `version` in `pyproject.toml`
+3. A new entry in `CHANGELOG.md`
+
+Follow semver: patch for bug fixes, minor for new features/parameters, major for breaking API changes.
 
 ## Architecture
 
@@ -56,3 +61,11 @@ Set at module load via `mpl.rcParams`. Figure widths follow Nature column widths
 ### Test file
 
 `tests/test_thermoflow.py` is a plain script (not pytest classes). It uses a global `check(name, condition)` helper and prints a summary. Tests use synthetic data built by `make_experiment()` — no real FCS files required. Matplotlib backend is forced to `'Agg'` at the top.
+
+## Gotchas
+
+- **`jet` colormap is banned** — the test suite asserts zero occurrences of `'jet'`/`"jet"` in source. Use `'viridis'` or `_PALETTE`.
+- **Asymmetric error bars** — to clip lower caps at zero without touching upper caps, pass `yerr=np.array([lower_arr, upper_arr])` to matplotlib bar/errorbar.
+- **Interactive backend in `.py` files** — `%matplotlib widget` is a notebook magic and cannot go in a `.py` file. The programmatic equivalent is `get_ipython().run_line_magic('matplotlib', 'widget')`; requires `ipympl` installed in the environment.
+- **Global C in PRI fit** — `_fit_global_exponential` fits a single shared baseline `C` across all samples simultaneously via `least_squares`. Per-sample free params are `A` and `k` only. Changing this would break the global-fit design.
+- **Gate coordinates are in log1p space** — `threshold_log` and all gate boundaries stored in `RectangleGate`/`PolygonGate`/etc. are in `log1p(raw_value)` space, matching what histogram/density plots show on their axes.
