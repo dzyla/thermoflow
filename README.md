@@ -246,6 +246,31 @@ report.export_pdf('report.pdf')
 - ipympl (interactive gating — `pip install ipympl`)
 - [flowio](https://github.com/whitews/FlowIO) (FCS file parsing)
 
+## Streamlit GUI
+
+A browser-based GUI covering the full workflow is available in `gui/streamlit_app.py`.
+
+```bash
+# install extra GUI deps (streamlit + plotly — may already be present)
+pip install streamlit plotly
+
+# launch
+streamlit run gui/streamlit_app.py
+```
+
+**Workflow tabs:**
+
+| Tab | What you can do |
+|---|---|
+| 📁 Load Data | Upload FCS files + CSV annotation, rename samples |
+| 🔲 Gate | Interactive density/histogram viewer; Rectangle, Ellipse, Threshold gates; save/load gates JSON |
+| 📊 PRI Analysis | Configure and run PRI fitting; live threshold preview |
+| 📈 Visualize | Decay curves, bar charts, summary grid, density plots, histograms |
+| 💾 Export | Download PRI CSVs, gates JSON, HTML/PDF report |
+
+The annotation CSV must have at minimum the columns `well`, `sample`, `time`.
+A template can be downloaded from the **Export** tab.
+
 ## Running tests
 
 ```bash

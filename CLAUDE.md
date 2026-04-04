@@ -62,6 +62,19 @@ Set at module load via `mpl.rcParams`. Figure widths follow Nature column widths
 
 `tests/test_thermoflow.py` is a plain script (not pytest classes). It uses a global `check(name, condition)` helper and prints a summary. Tests use synthetic data built by `make_experiment()` — no real FCS files required. Matplotlib backend is forced to `'Agg'` at the top.
 
+## Streamlit GUI
+
+Located in `gui/streamlit_app.py`. Run with:
+```bash
+conda run -n e1_esm streamlit run gui/streamlit_app.py
+```
+
+Key design decisions:
+- `FlowExperiment` is stored in `st.session_state["exp"]` and survives reruns.
+- `_patch_exp()` monkey-patches `_show_static_fig` so matplotlib figures are captured as PNG bytes into `st.session_state["last_fig"]` instead of being sent to IPython display. Call `_render(exp.plot_*)` to invoke any plot method and display the result.
+- Interactive gating uses a Plotly density heatmap (via `points_to_density_image`) + numeric inputs for gate bounds — no `ipympl` needed.
+- FCS files are written to a `tempfile.mkdtemp` directory stored in `st.session_state["tmpdir"]`; the glob pattern `tmpdir/*.fcs` is then passed to `load_fcs_files`.
+
 ## Gotchas
 
 - **`jet` colormap is banned** — the test suite asserts zero occurrences of `'jet'`/`"jet"` in source. Use `'viridis'` or `_PALETTE`.
