@@ -783,7 +783,7 @@ with tab_pri:
 
                     fig_thr = go.Figure(go.Histogram(
                         x=xv, nbinsx=150, marker_color="#4DBBD5",
-                        opacity=0.85, bargap=0,
+                        opacity=0.85,
                         hovertemplate="log1p=%{x:.3f}<br>count=%{y}<extra></extra>",
                     ))
                     fig_thr.add_vline(
