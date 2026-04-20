@@ -178,8 +178,26 @@ with open(src_path) as f:
 jet_count = src.count("'jet'") + src.count('"jet"')
 check("no jet colormap in source", jet_count == 0, f"found {jet_count} occurrences")
 
-# ── 10. export_html ───────────────────────────────────────────────────────────
-print("\n[10] HTML/PDF export")
+# ── 10. Tier 1 — median MFI ───────────────────────────────────────────────────
+print("\n[10] Tier 1 — median MFI (mfi_metric)")
+check("median_mfi helper exists", hasattr(tf, 'median_mfi'))
+
+e10 = make_experiment()
+e10.run_pri_analysis('RL1-H', control_sample='Ctrl', mfi_metric='median')
+check("median: pri_table non-empty", not e10.pri_table.empty)
+check("median: PRI_norm all finite",
+      e10.pri_table['PRI_norm'].dropna().apply(np.isfinite).all())
+check("median: pri_fits_norm has t_half", 't_half' in e10.pri_fits_norm.columns)
+
+# Default (geometric_mean) must produce identical columns — backward compat
+e10b = make_experiment()
+e10b.run_pri_analysis('RL1-H', control_sample='Ctrl')  # no mfi_metric arg
+check("geom_mean default: ddG_kin absent (no wt_sample)",
+      'ddG_kin' not in e10b.pri_fits_norm.columns)
+check("geom_mean default: pri_table non-empty", not e10b.pri_table.empty)
+
+# ── 11. export_html ───────────────────────────────────────────────────────────
+print("\n[11] HTML/PDF export")
 import tempfile
 e6 = make_experiment()
 e6.run_pri_analysis('RL1-H', control_sample='Ctrl')

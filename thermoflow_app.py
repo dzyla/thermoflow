@@ -367,6 +367,11 @@ def geometric_mfi(x: np.ndarray, eps: float = 1e-12) -> float:
     x = x[np.isfinite(x) & (x >= 0)]
     return float(np.expm1(np.mean(np.log1p(x + eps)))) if x.size > 0 else np.nan
 
+def median_mfi(x: np.ndarray, eps: float = 1e-12) -> float:
+    x = np.asarray(x, float)
+    x = x[np.isfinite(x) & (x >= 0)]
+    return float(np.expm1(np.median(np.log1p(x + eps)))) if x.size > 0 else np.nan
+
 class GateTemplate:
     """Predefined gate templates for common flow cytometry analyses."""
     
@@ -1695,7 +1700,11 @@ class FlowExperiment:
     def run_pri_analysis(self, channel: str, control_sample: str, samples: list = None,
                          pos_frac: float = 0.01, baseline_time: int = 0, pop_name: str = None,
                          n_bootstrap: int = 100, confidence: float = 0.95, ctrl_sample_list: list = None,
-                         reference_sample: str = None, threshold_log: float = None):
+                         reference_sample: str = None, threshold_log: float = None,
+                         mfi_metric: str = 'geometric_mean',
+                         wt_sample: str = None,
+                         temperature_c: float = 55.0,
+                         flatline_threshold: float = 0.10):
         """Enhanced PRI analysis with bootstrap confidence intervals and optional reference normalization."""
         df = self.get_data(pop_name)
         if df.empty:
@@ -1735,7 +1744,9 @@ class FlowExperiment:
         else:
             thr_log = float(np.quantile(np.log1p(_coerce_nonneg(ctrl[channel]).values), float(np.clip(1.0 - pos_frac, 0.0, 1.0))))
             print(f"   Auto threshold from control top {pos_frac*100:.1f}% quantile: {thr_log:.4f} (log1p)")
-        
+
+        _mfi_fn = median_mfi if mfi_metric == 'median' else geometric_mfi
+
         # 5. Calculate Reference Baseline if provided
         ref_pri_abs0 = None
         if reference_sample:
@@ -1751,7 +1762,7 @@ class FlowExperiment:
                     ref_log = np.log1p(ref_vals)
                     ref_n_pos = int(np.sum(ref_log >= thr_log))
                     ref_f_plus = (ref_n_pos / ref_vals.size) if ref_vals.size else 0.0
-                    ref_gmfi = geometric_mfi(ref_vals[ref_log >= thr_log]) if ref_n_pos else 0.0
+                    ref_gmfi = _mfi_fn(ref_vals[ref_log >= thr_log]) if ref_n_pos else 0.0
                     ref_pri_abs0 = ref_f_plus * ref_gmfi
                     
                     if not np.isfinite(ref_pri_abs0) or ref_pri_abs0 <= 0:
@@ -1770,7 +1781,7 @@ class FlowExperiment:
             # Calculate self-baseline gMFI (needed if falling back to self-normalization)
             t0_vals = sub.loc[sub["time"] == baseline_time, channel].values
             t0_pos_mask = np.log1p(t0_vals) >= thr_log
-            gmfi0 = geometric_mfi(t0_vals[t0_pos_mask])
+            gmfi0 = _mfi_fn(t0_vals[t0_pos_mask])
 
             for t in times:
                 vals = sub.loc[sub["time"] == t, channel].values
@@ -1778,7 +1789,7 @@ class FlowExperiment:
                 n_pos = int(np.sum(log_vals >= thr_log))
                 f_plus = (n_pos / vals.size) if vals.size else 0.0
                 
-                gmfi_pos = geometric_mfi(vals[log_vals >= thr_log]) if n_pos else 0.0
+                gmfi_pos = _mfi_fn(vals[log_vals >= thr_log]) if n_pos else 0.0
                 PRI_abs = f_plus * gmfi_pos
                 
                 # Choose normalization method based on reference availability
@@ -1808,7 +1819,7 @@ class FlowExperiment:
                         boot_log = np.log1p(boot_vals)
                         boot_n_pos = np.sum(boot_log >= thr_log)
                         boot_f_plus = boot_n_pos / len(boot_vals)
-                        boot_gmfi = geometric_mfi(boot_vals[boot_log >= thr_log]) if boot_n_pos else 0.0
+                        boot_gmfi = _mfi_fn(boot_vals[boot_log >= thr_log]) if boot_n_pos else 0.0
                         pri_samples.append(boot_f_plus * boot_gmfi)
                     
                     alpha = (1 - confidence) / 2
