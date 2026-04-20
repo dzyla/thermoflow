@@ -187,12 +187,52 @@ Add to `tests/test_thermoflow.py` (using the existing `make_experiment()` helper
 
 ---
 
-## 8. Files Changed
+## 8. README Updates
+
+Add a new **"Advanced PRI Analysis"** section to `README.md` after the existing PRI example, with two self-contained code blocks.
+
+### Example 1 — Median MFI + ΔΔG‡
+
+```python
+exp.run_pri_analysis(
+    channel="APC-A",
+    control_sample="untransfected",
+    mfi_metric="median",          # log-space median — matches manuscript definition
+    wt_sample="WT",               # reference for ΔΔG‡
+    temperature_c=55.0,           # assay temperature in °C
+)
+
+# pri_fits_norm now contains ddG_kin and ddG_kin_err (kcal/mol)
+print(exp.pri_fits_norm[["sample", "t_half", "ddG_kin", "ddG_kin_err"]])
+```
+
+### Example 2 — Hyper-stable / flatline variant
+
+```python
+exp.run_pri_analysis(
+    channel="APC-A",
+    control_sample="untransfected",
+    wt_sample="WT",
+    temperature_c=55.0,
+    flatline_threshold=0.10,      # samples with <10% signal drop → fit_quality='hyperstable'
+)
+
+# Hyper-stable variants appear with t_half=inf and ddG_kin=inf
+stable = exp.pri_fits_norm[exp.pri_fits_norm["fit_quality"] == "hyperstable"]
+print(stable[["sample", "t_half", "ddG_kin"]])
+```
+
+Both examples go under a `### Advanced PRI Analysis` heading. No prose beyond inline comments.
+
+---
+
+## 9. Files Changed
 
 | File | Change |
 |---|---|
 | `thermoflow_app.py` | Add `median_mfi`; update `run_pri_analysis` signature + dispatch; update `_fit_global_exponential` with flatline detection; add ΔΔG‡ block |
 | `gui/streamlit_app.py` | Add 3 controls in Advanced expander; wire to `run_pri_analysis` |
 | `tests/test_thermoflow.py` | Add 5 new `check()` assertions |
+| `README.md` | Add "Advanced PRI Analysis" section with 2 code examples |
 
 No new files. No version bump in this spec (defer to implementer per semver rules).
