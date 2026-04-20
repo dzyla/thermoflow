@@ -1842,6 +1842,34 @@ class FlowExperiment:
                                                           flatline_threshold=flatline_threshold)
         self.pri_fits_norm = self._fit_global_exponential(self.pri_table, "PRI_norm",
                                                            flatline_threshold=flatline_threshold)
+
+        # ΔΔG‡ via Transition State Theory (pre-exponential terms cancel at same T)
+        if wt_sample is not None:
+            _R_KCAL = 0.001987204258  # kcal / (mol·K)
+            _T_K = temperature_c + 273.15
+            _wt = self.pri_fits_norm[self.pri_fits_norm['sample'] == wt_sample]
+            if _wt.empty:
+                print(f"⚠️ wt_sample '{wt_sample}' not found in pri_fits_norm; skipping ΔΔG‡.")
+            else:
+                _t_half_wt = _wt['t_half'].values[0]
+                _t_half_wt_err = _wt['t_half_err'].values[0]
+                if not np.isfinite(_t_half_wt) or _t_half_wt <= 0:
+                    print(f"⚠️ wt_sample '{wt_sample}' has invalid t_half={_t_half_wt}; skipping ΔΔG‡.")
+                else:
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        self.pri_fits_norm['ddG_kin'] = (
+                            _R_KCAL * _T_K
+                            * np.log(self.pri_fits_norm['t_half'] / _t_half_wt)
+                        )
+                    _rel_err_wt = ((_t_half_wt_err / _t_half_wt) ** 2
+                                   if pd.notna(_t_half_wt_err) and _t_half_wt_err > 0 else 0.0)
+                    _rel_err_mut = (self.pri_fits_norm['t_half_err']
+                                    / self.pri_fits_norm['t_half']) ** 2
+                    self.pri_fits_norm['ddG_kin_err'] = (
+                        _R_KCAL * _T_K * np.sqrt(_rel_err_mut + _rel_err_wt)
+                    )
+                    print(f"✅ ΔΔG‡ calculated relative to '{wt_sample}' at {temperature_c}°C.")
+
         self.pri_channel = channel
         self.pri_pop = pop_name or self.active_pop
         self.pri_control_sample = valid_ctrl_name

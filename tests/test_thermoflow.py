@@ -271,6 +271,34 @@ check("WT sample fitted normally (not hyperstable)",
 check("WT sample has finite t_half",
       not wt.empty and np.isfinite(wt['t_half'].iloc[0]))
 
+# ── 13. Tier 1 — ΔΔG‡ calculation ────────────────────────────────────────────
+print("\n[13] Tier 1 \u2014 \u0394\u0394G\u2021 (ddG_kin)")
+e13 = make_experiment_flat()
+e13.run_pri_analysis('RL1-H', control_sample='Ctrl',
+                     wt_sample='WT', temperature_c=55.0)
+check("ddG_kin column present in pri_fits_norm",
+      'ddG_kin' in e13.pri_fits_norm.columns)
+check("ddG_kin_err column present in pri_fits_norm",
+      'ddG_kin_err' in e13.pri_fits_norm.columns)
+
+wt_ddg = e13.pri_fits_norm.loc[e13.pri_fits_norm['sample'] == 'WT', 'ddG_kin']
+check("WT ddG_kin == 0.0",
+      not wt_ddg.empty and abs(wt_ddg.values[0]) < 1e-10,
+      f"got {wt_ddg.values[0] if not wt_ddg.empty else 'missing'}")
+
+hs_ddg = e13.pri_fits_norm.loc[e13.pri_fits_norm['sample'] == 'HyperStable', 'ddG_kin']
+check("hyperstable ddG_kin is inf",
+      not hs_ddg.empty and hs_ddg.values[0] == np.inf,
+      f"got {hs_ddg.values[0] if not hs_ddg.empty else 'missing'}")
+
+# No wt_sample → columns must NOT appear (backward compat)
+e13b = make_experiment()
+e13b.run_pri_analysis('RL1-H', control_sample='Ctrl')
+check("no wt_sample: ddG_kin absent",
+      'ddG_kin' not in e13b.pri_fits_norm.columns)
+check("no wt_sample: ddG_kin_err absent",
+      'ddG_kin_err' not in e13b.pri_fits_norm.columns)
+
 # ── Results ───────────────────────────────────────────────────────────────────
 print(f"\n{'='*50}")
 print(f"  Results: {PASS} passed, {FAIL} failed")
