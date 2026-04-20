@@ -168,7 +168,7 @@ exp.run_pri_analysis('RL1-H', control_sample='Ctrl', threshold_log=5.5)
 exp.run_pri_analysis(
     channel="APC-A",
     control_sample="untransfected",
-    mfi_metric="median",          # log-space median × f_plus
+    mfi_metric="median",          # log-space median of positive events (alt. to geometric mean)
     wt_sample="WT",               # reference for ΔΔG‡ (kcal/mol)
     temperature_c=55.0,           # assay temperature in °C
 )
