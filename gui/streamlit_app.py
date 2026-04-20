@@ -769,6 +769,22 @@ with tab_pri:
                         "threshold_log", value=5.0, step=0.05, format="%.4f",
                         key="pri_thr_val",
                     )
+                st.divider()
+                mfi_metric = st.radio(
+                    "MFI metric", ["geometric_mean", "median"],
+                    horizontal=True, key="pri_mfi_metric",
+                    help="'median' matches the published PRI definition (log-space median × f_plus).",
+                )
+                wt_opts = ["(none)"] + samples_in_pop
+                wt_sample_sel = st.selectbox(
+                    "WT reference (for ΔΔG‡)", wt_opts, key="pri_wt",
+                    help="If set, adds ddG_kin and ddG_kin_err columns (kcal/mol) to fit results.",
+                )
+                wt_sample = None if wt_sample_sel == "(none)" else wt_sample_sel
+                temperature_c = st.number_input(
+                    "Assay temperature (°C)", value=55.0, step=0.5,
+                    format="%.1f", key="pri_temp",
+                )
 
         with p_right:
             st.subheader("Threshold Preview")
@@ -819,6 +835,9 @@ with tab_pri:
                             n_bootstrap=n_boot,
                             baseline_time=baseline_time,
                             threshold_log=custom_thr if use_thr else None,
+                            mfi_metric=mfi_metric,
+                            wt_sample=wt_sample,
+                            temperature_c=temperature_c,
                         )
                     for w in caught:
                         st.warning(str(w.message))
