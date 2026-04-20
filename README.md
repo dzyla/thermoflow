@@ -161,6 +161,37 @@ exp.plot_sliced_histogram('RL1-H', slice_by='sample', filter_col='time', filter_
 exp.run_pri_analysis('RL1-H', control_sample='Ctrl', threshold_log=5.5)
 ```
 
+### Advanced PRI Analysis
+
+```python
+# Median MFI metric (matches manuscript definition) + ΔΔG‡ relative to WT
+exp.run_pri_analysis(
+    channel="APC-A",
+    control_sample="untransfected",
+    mfi_metric="median",          # log-space median × f_plus
+    wt_sample="WT",               # reference for ΔΔG‡ (kcal/mol)
+    temperature_c=55.0,           # assay temperature in °C
+)
+
+# pri_fits_norm now contains ddG_kin and ddG_kin_err columns
+print(exp.pri_fits_norm[["sample", "t_half", "ddG_kin", "ddG_kin_err"]])
+```
+
+```python
+# Hyper-stable / flatline variant detection
+exp.run_pri_analysis(
+    channel="APC-A",
+    control_sample="untransfected",
+    wt_sample="WT",
+    temperature_c=55.0,
+    flatline_threshold=0.10,      # <10% signal drop → fit_quality='hyperstable', t_half=inf
+)
+
+# Hyper-stable samples appear with t_half=inf and ddG_kin=inf
+stable = exp.pri_fits_norm[exp.pri_fits_norm["fit_quality"] == "hyperstable"]
+print(stable[["sample", "t_half", "ddG_kin"]])
+```
+
 ---
 
 ## Sample management
