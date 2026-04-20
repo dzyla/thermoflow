@@ -1745,6 +1745,11 @@ class FlowExperiment:
             thr_log = float(np.quantile(np.log1p(_coerce_nonneg(ctrl[channel]).values), float(np.clip(1.0 - pos_frac, 0.0, 1.0))))
             print(f"   Auto threshold from control top {pos_frac*100:.1f}% quantile: {thr_log:.4f} (log1p)")
 
+        _VALID_MFI_METRICS = {'geometric_mean', 'median'}
+        if mfi_metric not in _VALID_MFI_METRICS:
+            raise ValueError(
+                f"mfi_metric must be one of {sorted(_VALID_MFI_METRICS)!r}, got {mfi_metric!r}"
+            )
         _mfi_fn = median_mfi if mfi_metric == 'median' else geometric_mfi
 
         # 5. Calculate Reference Baseline if provided

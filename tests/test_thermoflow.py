@@ -196,6 +196,14 @@ check("geom_mean default: ddG_kin absent (no wt_sample)",
       'ddG_kin' not in e10b.pri_fits_norm.columns)
 check("geom_mean default: pri_table non-empty", not e10b.pri_table.empty)
 
+e10c = make_experiment()
+e10c.run_pri_analysis('RL1-H', control_sample='Ctrl', mfi_metric='geometric_mean')
+check("median != geometric_mean PRI values (metrics differ)",
+      not np.allclose(
+          e10.pri_table['PRI_norm'].dropna().values,
+          e10c.pri_table['PRI_norm'].dropna().values,
+      ))
+
 # ── 11. export_html ───────────────────────────────────────────────────────────
 print("\n[11] HTML/PDF export")
 import tempfile
