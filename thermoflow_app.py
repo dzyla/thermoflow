@@ -1750,6 +1750,10 @@ class FlowExperiment:
             raise ValueError(
                 f"mfi_metric must be one of {sorted(_VALID_MFI_METRICS)!r}, got {mfi_metric!r}"
             )
+        if not 0.0 <= flatline_threshold <= 1.0:
+            raise ValueError(
+                f"flatline_threshold must be in [0, 1], got {flatline_threshold!r}"
+            )
         _mfi_fn = median_mfi if mfi_metric == 'median' else geometric_mfi
 
         # 5. Calculate Reference Baseline if provided
@@ -1915,8 +1919,8 @@ class FlowExperiment:
                 else:
                     _drop = 0.0  # all zeros → treat as flatline
             else:
-                _drop = 1.0  # single point — treat as normal decaying
-            if _drop < flatline_threshold:
+                _drop = 1.0  # zero or one finite point — cannot fit slope; treat as normal
+            if 0.0 <= _drop < flatline_threshold:
                 flatline_samples.append(_s)
             else:
                 normal_samples.append(_s)
@@ -1983,7 +1987,7 @@ class FlowExperiment:
 
         flat_rows = [
             dict(sample=_s, A=np.nan, A_err=np.nan, k=0.0, k_err=np.nan,
-                 C=global_C, C_err=param_errors[0],
+                 C=global_C, C_err=C_err,
                  t_half=np.inf, t_half_err=np.nan, r2=np.nan, fit_quality='hyperstable')
             for _s in flatline_samples
         ]
