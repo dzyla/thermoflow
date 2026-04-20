@@ -5,6 +5,17 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.4.0] - 2026-04-19
+### Added
+- `median_mfi` helper and `mfi_metric` param in `run_pri_analysis` (`'geometric_mean'` | `'median'`) — matches manuscript PRI definition
+- Flatline / hyperstable detection in `_fit_global_exponential`: samples with negligible signal decay get `fit_quality='hyperstable'` and `t_half=inf`
+- ΔΔG‡ calculation (`ddG_kin`, `ddG_kin_err` columns in `pri_fits_norm`) via Transition State Theory when `wt_sample` is supplied
+- Input validation for `mfi_metric` and `flatline_threshold` parameters
+- Streamlit GUI: MFI metric radio, WT reference selector, assay temperature input in PRI Analysis tab
+- README: Advanced PRI Analysis code examples
+
+---
+
 ## [0.3.0] - 2026-04-03
 
 ### Added
