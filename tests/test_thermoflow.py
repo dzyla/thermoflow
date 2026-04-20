@@ -291,6 +291,10 @@ check("hyperstable ddG_kin is inf",
       not hs_ddg.empty and hs_ddg.values[0] == np.inf,
       f"got {hs_ddg.values[0] if not hs_ddg.empty else 'missing'}")
 
+wt_err = e13.pri_fits_norm.loc[e13.pri_fits_norm['sample'] == 'WT', 'ddG_kin_err']
+check("WT ddG_kin_err is finite and non-negative",
+      not wt_err.empty and np.isfinite(wt_err.values[0]) and wt_err.values[0] >= 0)
+
 # No wt_sample → columns must NOT appear (backward compat)
 e13b = make_experiment()
 e13b.run_pri_analysis('RL1-H', control_sample='Ctrl')

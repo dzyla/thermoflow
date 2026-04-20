@@ -1856,18 +1856,18 @@ class FlowExperiment:
                 if not np.isfinite(_t_half_wt) or _t_half_wt <= 0:
                     print(f"⚠️ wt_sample '{wt_sample}' has invalid t_half={_t_half_wt}; skipping ΔΔG‡.")
                 else:
+                    _rel_err_wt = ((_t_half_wt_err / _t_half_wt) ** 2
+                                   if pd.notna(_t_half_wt_err) and _t_half_wt_err > 0 else 0.0)
                     with np.errstate(divide='ignore', invalid='ignore'):
                         self.pri_fits_norm['ddG_kin'] = (
                             _R_KCAL * _T_K
                             * np.log(self.pri_fits_norm['t_half'] / _t_half_wt)
                         )
-                    _rel_err_wt = ((_t_half_wt_err / _t_half_wt) ** 2
-                                   if pd.notna(_t_half_wt_err) and _t_half_wt_err > 0 else 0.0)
-                    _rel_err_mut = (self.pri_fits_norm['t_half_err']
-                                    / self.pri_fits_norm['t_half']) ** 2
-                    self.pri_fits_norm['ddG_kin_err'] = (
-                        _R_KCAL * _T_K * np.sqrt(_rel_err_mut + _rel_err_wt)
-                    )
+                        _rel_err_mut = (self.pri_fits_norm['t_half_err']
+                                        / self.pri_fits_norm['t_half']) ** 2
+                        self.pri_fits_norm['ddG_kin_err'] = (
+                            _R_KCAL * _T_K * np.sqrt(_rel_err_mut + _rel_err_wt)
+                        )
                     print(f"✅ ΔΔG‡ calculated relative to '{wt_sample}' at {temperature_c}°C.")
 
         self.pri_channel = channel
