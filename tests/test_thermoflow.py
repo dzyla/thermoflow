@@ -27,6 +27,30 @@ def check(name, condition, msg=''):
         FAIL += 1
 
 
+def make_experiment_flat():
+    """Experiment with a flat/hyperstable sample (no signal decay over time)."""
+    rng = np.random.default_rng(1)
+    rows = []
+    times = np.linspace(0, 30, 5)
+    for t in times:
+        # Ctrl — low signal (untransfected)
+        for v in rng.exponential(scale=5, size=50):
+            rows.append({'sample': 'Ctrl', 'time': float(t), 'RL1-H': float(v),
+                         'FSC-A': 1000., 'SSC-A': 500., 'well': f'Ctrl_{t}'})
+        # WT — decaying signal
+        for v in rng.exponential(scale=max(300 * np.exp(-0.15 * t), 5), size=50):
+            rows.append({'sample': 'WT', 'time': float(t), 'RL1-H': float(v),
+                         'FSC-A': 1000., 'SSC-A': 500., 'well': f'WT_{t}'})
+        # HyperStable — constant high signal (no decay)
+        for v in rng.exponential(scale=300, size=50):
+            rows.append({'sample': 'HyperStable', 'time': float(t), 'RL1-H': float(v),
+                         'FSC-A': 1000., 'SSC-A': 500., 'well': f'HS_{t}'})
+    e = tf.FlowExperiment()
+    e.populations['raw'] = pd.DataFrame(rows)
+    e.active_pop = 'raw'
+    return e
+
+
 def make_experiment(n_times=5, n_events=50):
     """Synthetic FlowExperiment with PRI-able data."""
     rng = np.random.default_rng(0)
@@ -226,6 +250,26 @@ pdf_size = os.path.getsize(pdf_path)
 check("PDF file created", os.path.exists(pdf_path))
 check("PDF file > 1 KB", pdf_size > 1000, f"size={pdf_size}")
 os.unlink(pdf_path)
+
+# ── 12. Tier 1 — flatline / hyperstable detection ─────────────────────────────
+print("\n[12] Tier 1 — flatline detection")
+e12 = make_experiment_flat()
+e12.run_pri_analysis('RL1-H', control_sample='Ctrl', flatline_threshold=0.10)
+
+hs = e12.pri_fits_norm[e12.pri_fits_norm['sample'] == 'HyperStable']
+check("hyperstable: fit_quality='hyperstable'",
+      not hs.empty and hs['fit_quality'].iloc[0] == 'hyperstable',
+      f"got '{hs['fit_quality'].iloc[0] if not hs.empty else 'missing'}'")
+check("hyperstable: t_half is inf",
+      not hs.empty and hs['t_half'].iloc[0] == np.inf)
+check("hyperstable: k == 0.0",
+      not hs.empty and hs['k'].iloc[0] == 0.0)
+
+wt = e12.pri_fits_norm[e12.pri_fits_norm['sample'] == 'WT']
+check("WT sample fitted normally (not hyperstable)",
+      not wt.empty and wt['fit_quality'].iloc[0] != 'hyperstable')
+check("WT sample has finite t_half",
+      not wt.empty and np.isfinite(wt['t_half'].iloc[0]))
 
 # ── Results ───────────────────────────────────────────────────────────────────
 print(f"\n{'='*50}")

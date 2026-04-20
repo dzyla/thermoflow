@@ -1834,8 +1834,10 @@ class FlowExperiment:
                 tables.append(row)
         
         self.pri_table = pd.DataFrame(tables).sort_values(["sample","time"]).reset_index(drop=True)
-        self.pri_fits_abs = self._fit_global_exponential(self.pri_table, "PRI_abs")
-        self.pri_fits_norm = self._fit_global_exponential(self.pri_table, "PRI_norm")
+        self.pri_fits_abs = self._fit_global_exponential(self.pri_table, "PRI_abs",
+                                                          flatline_threshold=flatline_threshold)
+        self.pri_fits_norm = self._fit_global_exponential(self.pri_table, "PRI_norm",
+                                                           flatline_threshold=flatline_threshold)
         self.pri_channel = channel
         self.pri_pop = pop_name or self.active_pop
         self.pri_control_sample = valid_ctrl_name
@@ -1859,7 +1861,8 @@ class FlowExperiment:
                 res_list.append(np.nan)
         return res_list
 
-    def _fit_global_exponential(self, df_source: pd.DataFrame, which: str) -> pd.DataFrame:
+    def _fit_global_exponential(self, df_source: pd.DataFrame, which: str,
+                                 flatline_threshold: float = 0.10) -> pd.DataFrame:
         all_samples = sorted(df_source['sample'].unique())
         times_list_all, values_list_all = [], []
         for s in all_samples:
@@ -1891,8 +1894,44 @@ class FlowExperiment:
             for s in skipped
         ]
 
+        # --- Flatline / hyperstable detection ---
+        # A sample is hyperstable if the normalised linear-regression decay rate
+        # (slope / mean_signal) is below flatline_threshold per unit time scaled
+        # by the time span.  This is robust to per-timepoint noise that would
+        # fool a simple first-to-last comparison.
+        _eps_flat = 1e-12
+        flatline_samples = []
+        normal_samples, normal_times, normal_values = [], [], []
+        for _s, _t, _v in zip(samples, times_list, values_list):
+            _mask = np.isfinite(_v)
+            _vf, _tf = _v[_mask], _t[_mask]
+            if _vf.size > 1:
+                _mean_v = np.mean(np.abs(_vf))
+                if _mean_v > _eps_flat:
+                    _slope = np.polyfit(_tf, _vf, 1)[0]
+                    _span = max(_tf[-1] - _tf[0], _eps_flat)
+                    # Normalised total drop over time span, relative to mean signal
+                    _drop = -_slope * _span / (_mean_v + _eps_flat)
+                else:
+                    _drop = 0.0  # all zeros → treat as flatline
+            else:
+                _drop = 1.0  # single point — treat as normal decaying
+            if _drop < flatline_threshold:
+                flatline_samples.append(_s)
+            else:
+                normal_samples.append(_s)
+                normal_times.append(_t)
+                normal_values.append(_v)
+        samples, times_list, values_list = normal_samples, normal_times, normal_values
+
         if not samples:
-            return pd.DataFrame(skipped_rows)
+            _flat_early = [
+                dict(sample=_s, A=np.nan, A_err=np.nan, k=0.0, k_err=np.nan,
+                     C=np.nan, C_err=np.nan, t_half=np.inf, t_half_err=np.nan,
+                     r2=np.nan, fit_quality='hyperstable')
+                for _s in flatline_samples
+            ]
+            return pd.DataFrame(skipped_rows + _flat_early)
 
         min_vals = []
         for y in values_list:
@@ -1942,6 +1981,13 @@ class FlowExperiment:
 
         C_err = param_errors[0]
 
+        flat_rows = [
+            dict(sample=_s, A=np.nan, A_err=np.nan, k=0.0, k_err=np.nan,
+                 C=global_C, C_err=param_errors[0],
+                 t_half=np.inf, t_half_err=np.nan, r2=np.nan, fit_quality='hyperstable')
+            for _s in flatline_samples
+        ]
+
         out = []
         for i, s in enumerate(samples):
             A, k = res.x[1+2*i], res.x[2+2*i]
@@ -1977,7 +2023,7 @@ class FlowExperiment:
                 r2=r2, fit_quality=fit_quality
             ))
 
-        all_rows = out + skipped_rows
+        all_rows = out + skipped_rows + flat_rows
         return pd.DataFrame(all_rows).sort_values("sample").reset_index(drop=True)
 
     def plot_pri(self, which: str = "PRI_norm", cols: int = 2, title: str = None, save_path: str = None,
