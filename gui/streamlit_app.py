@@ -785,6 +785,18 @@ with tab_pri:
                     "Assay temperature (°C)", value=55.0, step=0.5,
                     format="%.1f", key="pri_temp",
                 )
+                st.divider()
+                _n_ds = (int(pri_df['dataset'].nunique())
+                         if 'dataset' in pri_df.columns else 1)
+                per_plate = st.checkbox(
+                    "Per-plate normalization", value=(_n_ds > 1),
+                    key="pri_per_plate",
+                    help=("Analyse each plate independently: its own control sets the "
+                          "threshold, its own reference sample (WT) sets the baseline, and "
+                          "it gets its own background C. Removes plate-to-plate batch "
+                          f"effects. Detected {_n_ds} plate(s)."),
+                    disabled=(_n_ds <= 1),
+                )
 
         with p_right:
             st.subheader("Threshold Preview")
@@ -838,6 +850,7 @@ with tab_pri:
                             mfi_metric=mfi_metric,
                             wt_sample=wt_sample,
                             temperature_c=temperature_c,
+                            per_plate=per_plate,
                         )
                     for w in caught:
                         st.warning(str(w.message))

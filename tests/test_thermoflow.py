@@ -303,6 +303,111 @@ check("no wt_sample: ddG_kin absent",
 check("no wt_sample: ddG_kin_err absent",
       'ddG_kin_err' not in e13b.pri_fits_norm.columns)
 
+# ── 14. Weighted fit removes expression-scale bias ────────────────────────────
+print("\n[14] Weighted fit — scale-domination regression")
+# Two samples, IDENTICAL true k and shared absolute background, 20x expression gap.
+# A correct fit must recover nearly the same k for both despite the shared C.
+def _make_scale_experiment():
+    rng = np.random.default_rng(7)
+    times = [0, 1, 3, 5, 10, 20, 30]
+    ktrue, C_abs = 0.05, 30.0
+    rows = []
+    # control to set threshold well below signal
+    for t in times:
+        for v in rng.exponential(5, 200):
+            rows.append({'sample': 'Ctrl', 'time': float(t), 'RL1-H': float(v), 'well': f'C{t}'})
+    for name, A in [('Hi', 4000.0), ('Lo', 200.0)]:
+        for t in times:
+            mu = A * np.exp(-ktrue * t) + C_abs
+            for v in rng.lognormal(np.log(mu), 0.10, 400):
+                rows.append({'sample': name, 'time': float(t), 'RL1-H': float(v), 'well': f'{name}{t}'})
+    ex = tf.FlowExperiment()
+    ex.populations['raw'] = pd.DataFrame(rows); ex.active_pop = 'raw'
+    return ex
+
+e14 = _make_scale_experiment()
+e14.run_pri_analysis('RL1-H', control_sample='Ctrl', reference_sample='Hi', n_bootstrap=0)
+k_hi = e14.pri_fits_abs.loc[e14.pri_fits_abs['sample'] == 'Hi', 'k'].values[0]
+k_lo = e14.pri_fits_abs.loc[e14.pri_fits_abs['sample'] == 'Lo', 'k'].values[0]
+check("weighted fit: Hi k near 0.05", abs(k_hi - 0.05) / 0.05 < 0.25, f"k_hi={k_hi:.4f}")
+check("weighted fit: Lo k near 0.05 (no scale domination)",
+      abs(k_lo - 0.05) / 0.05 < 0.35, f"k_lo={k_lo:.4f}")
+
+# Bootstrap SE columns now present for BOTH metrics
+e14b = _make_scale_experiment()
+e14b.run_pri_analysis('RL1-H', control_sample='Ctrl', reference_sample='Hi', n_bootstrap=50)
+check("PRI_abs_se column present", 'PRI_abs_se' in e14b.pri_table.columns)
+check("PRI_norm_se column present", 'PRI_norm_se' in e14b.pri_table.columns)
+check("PRI_norm CI columns present",
+      'PRI_norm_ci_low' in e14b.pri_table.columns and 'PRI_norm_ci_high' in e14b.pri_table.columns)
+
+# Deterministic given random_state
+e14c = _make_scale_experiment()
+e14c.run_pri_analysis('RL1-H', control_sample='Ctrl', reference_sample='Hi', n_bootstrap=50)
+check("bootstrap reproducible with fixed random_state",
+      np.allclose(e14b.pri_table['PRI_abs_se'].fillna(0).values,
+                  e14c.pri_table['PRI_abs_se'].fillna(0).values))
+
+# ── 15. Significance-aware flatline ────────────────────────────────────────────
+print("\n[15] Flatline requires statistical insignificance")
+# A slow but clearly real decay must NOT be flagged hyperstable.
+rng = np.random.default_rng(3)
+rows = []
+times = [0, 1, 3, 5, 10, 20, 30]
+for t in times:
+    for v in rng.exponential(5, 100):
+        rows.append({'sample': 'Ctrl', 'time': float(t), 'RL1-H': float(v), 'well': f'C{t}'})
+    # gentle but monotonic decay ~ e^{-0.012 t}: ~30% total drop, low noise
+    mu = 500 * np.exp(-0.012 * t) + 20
+    for v in rng.lognormal(np.log(mu), 0.03, 300):
+        rows.append({'sample': 'SlowReal', 'time': float(t), 'RL1-H': float(v), 'well': f'S{t}'})
+e15 = tf.FlowExperiment()
+e15.populations['raw'] = pd.DataFrame(rows); e15.active_pop = 'raw'
+e15.run_pri_analysis('RL1-H', control_sample='Ctrl', n_bootstrap=0, flatline_threshold=0.5)
+sr = e15.pri_fits_abs[e15.pri_fits_abs['sample'] == 'SlowReal']
+check("significant slow decay NOT flagged hyperstable",
+      not sr.empty and sr['fit_quality'].iloc[0] != 'hyperstable',
+      f"got '{sr['fit_quality'].iloc[0] if not sr.empty else 'missing'}'")
+check("significant slow decay has finite t_half",
+      not sr.empty and np.isfinite(sr['t_half'].iloc[0]))
+
+# ── 16. Per-plate normalization ────────────────────────────────────────────────
+print("\n[16] Per-plate (multi-dataset) normalization")
+rng = np.random.default_rng(11)
+rows = []
+# Two plates with different instrument gain; each has its own Ctrl + Fwt.
+for plate, gain in [('P1', 1.0), ('P2', 3.0)]:
+    for name, A, k in [('Fwt', 400.0, 0.04), ('Mut', 300.0, 0.10)]:
+        for t in times:
+            mu = gain * (A * np.exp(-k * t) + 15)
+            for v in rng.lognormal(np.log(mu), 0.08, 300):
+                rows.append({'sample': name, 'time': float(t), 'RL1-H': float(v),
+                             'well': f'{plate}{name}{t}', 'dataset': plate})
+    for t in times:
+        for v in rng.exponential(5 * gain, 150):
+            rows.append({'sample': 'Ctrl', 'time': float(t), 'RL1-H': float(v),
+                         'well': f'{plate}C{t}', 'dataset': plate})
+e16 = tf.FlowExperiment()
+e16.populations['raw'] = pd.DataFrame(rows); e16.active_pop = 'raw'
+e16.run_pri_analysis('RL1-H', control_sample='Ctrl', reference_sample='Fwt',
+                     per_plate=True, n_bootstrap=0)
+check("per_plate: pri_table has dataset column", 'dataset' in e16.pri_table.columns)
+check("per_plate: fits have dataset column", 'dataset' in e16.pri_fits_norm.columns)
+check("per_plate: Fwt appears once per plate (2 rows)",
+      (e16.pri_fits_norm['sample'] == 'Fwt').sum() == 2)
+# The mutant's k should be recovered on BOTH plates despite 3x gain difference
+mut = e16.pri_fits_abs[e16.pri_fits_abs['sample'] == 'Mut'].sort_values('dataset')
+check("per_plate: Mut k consistent across plates (gain-independent)",
+      len(mut) == 2 and abs(mut['k'].values[0] - mut['k'].values[1]) < 0.03,
+      f"k={mut['k'].values}")
+# Plotting must not crash with duplicate sample names across plates
+try:
+    e16.plot_pri(which='PRI_norm', cols=2)
+    e16.plot_pri_bars(which='t_half', use_norm=True, norm_sample='Fwt')
+    check("per_plate: plotting runs without error", True)
+except Exception as ex:
+    check("per_plate: plotting runs without error", False, str(ex))
+
 # ── Results ───────────────────────────────────────────────────────────────────
 print(f"\n{'='*50}")
 print(f"  Results: {PASS} passed, {FAIL} failed")

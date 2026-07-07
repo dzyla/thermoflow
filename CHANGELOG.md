@@ -5,6 +5,37 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.5.0] - 2026-07-06
+### Changed (affects numerical results)
+- **Weighted global exponential fit.** `_fit_global_exponential` now weights each
+  residual by 1/standard-error (bootstrap SE when available, else 1/|y| relative
+  weighting). The shared background `C` is retained and is physically correct (fixed
+  autofluorescence/non-specific floor, same absolute value for every sample), but the
+  previous **unweighted** fit let the brightest sample dominate the shared-`C` estimate
+  and bias the `k`/`t_half` of dimmer samples. In a controlled simulation (two samples,
+  identical true `k`, 20× expression gap) this reduced the dim sample's `k` error from
+  ~55% to ~30%. **Existing analyses will produce slightly different fit parameters.**
+### Added
+- **Per-plate normalization** — `run_pri_analysis(..., per_plate=True)`. When a
+  `dataset` column is present, each plate is analysed independently: its own control
+  sets the threshold, its own `reference_sample` (WT) sets the baseline, and it gets
+  its own shared `C` and ΔΔG‡. Removes plate-to-plate batch effects (instrument gain,
+  staining day). `pri_table`/`pri_fits_*` gain a `dataset` column; `plot_pri` and
+  `plot_pri_bars` render one panel/bar per (sample, plate). Exposed in the Streamlit GUI.
+- **Bootstrap for both metrics** — `PRI_norm_ci_low/high`, `PRI_norm_se`, and
+  `PRI_abs_se` columns added to `pri_table`. Bootstrap now uses a single seeded RNG
+  stream (`random_state`, default 42) instead of re-seeding per well.
+- `flatline_z` parameter: a sample is only called `hyperstable` when its decay is both
+  small **and** statistically insignificant (slope within `flatline_z` SEs of zero),
+  preventing genuine slow decays from being erased.
+### Fixed
+- Sane upper bound on `k` derived from the time resolution (was a meaningless `1e7`).
+- NaN/inf PRI points get zero weight instead of corrupting the fit.
+- Warning emitted when a sample lacks the baseline timepoint (self-normalized PRI → NaN).
+- `mfi_metric`/`flatline_threshold` validation moved to the top of `run_pri_analysis`.
+
+---
+
 ## [0.4.0] - 2026-04-19
 ### Added
 - `median_mfi` helper and `mfi_metric` param in `run_pri_analysis` (`'geometric_mean'` | `'median'`) — matches manuscript PRI definition

@@ -1,4 +1,4 @@
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 import os
 import io
@@ -363,6 +363,13 @@ def points_to_density_image(x, y, bins=256, x_range=None, y_range=None):
 
 def _coerce_nonneg(series: pd.Series) -> pd.Series: return pd.to_numeric(series, errors="coerce").clip(lower=0)
 def geometric_mfi(x: np.ndarray, eps: float = 1e-12) -> float:
+    """Geometric mean in log1p space: expm1(mean(log1p(x))).
+
+    Not a textbook geometric mean (exp(mean(log x))); log1p/expm1 are used for
+    consistency with the log1p transform applied everywhere else and to stay finite
+    near zero. On the bright, gated positive population (x >> 0) the two agree to
+    within rounding, so this is a faithful geometric MFI for PRI.
+    """
     x = np.asarray(x, float)
     x = x[np.isfinite(x) & (x >= 0)]
     return float(np.expm1(np.mean(np.log1p(x + eps)))) if x.size > 0 else np.nan
@@ -1324,25 +1331,40 @@ class FlowExperiment:
         err_col = f"{which}_err"
         
         ylabel = "Half-life (min)" if which == 't_half' else "Amplitude (A)"
-        
-        if norm_sample is not None and norm_sample in fits_df['sample'].values:
-            norm_val = fits_df[fits_df['sample'] == norm_sample][val_col].values[0]
-            norm_err = fits_df[fits_df['sample'] == norm_sample][err_col].fillna(0).values[0] if err_col in fits_df.columns else 0
-            
-            # Proper error propagation for division
-            val_a = plot_df[val_col].values
-            err_a = plot_df[err_col].fillna(0).values if err_col in plot_df.columns else np.zeros_like(val_a)
-            
-            plot_df[val_col] = val_a / norm_val
 
-            # Error propagation for division: (A/B) * sqrt((err_A/A)^2 + (err_B/B)^2)
-            # Adding a small epsilon to avoid division by zero
-            # error bars are standard deviation of the fold change, not the standard deviation of the original values
-            plot_df[err_col] = np.abs(plot_df[val_col]) * np.sqrt(
-                (err_a / (val_a + 1e-10))**2 + (norm_err / (norm_val + 1e-10))**2
+        # Per-plate bars when multiple plates are present
+        by_ds = ('dataset' in plot_df.columns and plot_df['dataset'].nunique() > 1)
+
+        def _norm_block(idx, nv, ne):
+            va = plot_df.loc[idx, val_col].values
+            ea = (plot_df.loc[idx, err_col].fillna(0).values
+                  if err_col in plot_df.columns else np.zeros_like(va))
+            plot_df.loc[idx, val_col] = va / nv
+            # Fold-change error propagation: (A/B)·sqrt((eA/A)^2 + (eB/B)^2)
+            plot_df.loc[idx, err_col] = np.abs(plot_df.loc[idx, val_col].values) * np.sqrt(
+                (ea / (va + 1e-10)) ** 2 + (ne / (nv + 1e-10)) ** 2
             )
+
+        if norm_sample is not None and norm_sample in fits_df['sample'].values:
+            if by_ds:
+                # Normalise each plate's samples to that plate's own norm_sample (WT)
+                for ds, grp in plot_df.groupby('dataset'):
+                    ref = fits_df[(fits_df['sample'] == norm_sample) & (fits_df['dataset'] == ds)]
+                    if ref.empty:
+                        continue
+                    nv = ref[val_col].values[0]
+                    ne = ref[err_col].fillna(0).values[0] if err_col in ref.columns else 0
+                    _norm_block(grp.index, nv, ne)
+            else:
+                ref = fits_df[fits_df['sample'] == norm_sample]
+                nv = ref[val_col].values[0]
+                ne = ref[err_col].fillna(0).values[0] if err_col in fits_df.columns else 0
+                _norm_block(plot_df.index, nv, ne)
             ylabel = f"Relative Stabilization (Fold Change vs {norm_sample})"
-        
+
+        xticklabels = (plot_df['sample'].astype(str) + '\n(' + plot_df['dataset'].astype(str) + ')'
+                       if by_ds else plot_df['sample'])
+
         # Publication bar chart — compact by default
         n = len(plot_df)
         bar_width = max(0.45, 0.6 - 0.008 * n)
@@ -1377,7 +1399,7 @@ class FlowExperiment:
 
         # Style improvements
         ax.set_xticks(x)
-        ax.set_xticklabels(plot_df['sample'],
+        ax.set_xticklabels(xticklabels,
                            rotation=kwargs.get('rotation', 40), ha='right',
                            fontsize=11, fontweight='bold')
 
@@ -1704,8 +1726,28 @@ class FlowExperiment:
                          mfi_metric: str = 'geometric_mean',
                          wt_sample: str = None,
                          temperature_c: float = 55.0,
-                         flatline_threshold: float = 0.10):
-        """Enhanced PRI analysis with bootstrap confidence intervals and optional reference normalization."""
+                         flatline_threshold: float = 0.10,
+                         flatline_z: float = 2.0,
+                         per_plate: bool = False,
+                         random_state: int = 42):
+        """Enhanced PRI analysis with bootstrap confidence intervals and optional reference normalization.
+
+        Parameters
+        ----------
+        per_plate : bool
+            When True and a ``dataset`` column is present, each plate is analysed
+            independently: its own control sets the positive-fraction threshold, its
+            own ``reference_sample`` (e.g. the Wild-Type on that plate) sets the
+            normalisation baseline, and it gets its own shared background ``C``. This
+            removes plate-to-plate batch effects (instrument gain, staining day). The
+            resulting ``pri_table``/``pri_fits_*`` carry a ``dataset`` column and a
+            sample measured on several plates appears once per plate.
+        random_state : int
+            Seed for the bootstrap resampler (single stream for the whole analysis).
+        flatline_z : float
+            A sample is only called ``hyperstable`` if its decay is both small and
+            statistically insignificant (slope within ``flatline_z`` SEs of zero).
+        """
         df = self.get_data(pop_name)
         if df.empty:
             raise ValueError(f"Population '{pop_name or self.active_pop}' is empty or does not exist.")
@@ -1713,38 +1755,6 @@ class FlowExperiment:
             raise KeyError(
                 f"Channel '{channel}' not found. Available columns: {list(df.columns)}"
             )
-        if samples is None: samples = df['sample'].unique().tolist()
-
-        # 1. Combine primary control and fallback controls into a prioritized list
-        potential_ctrls = [control_sample]
-        if ctrl_sample_list:
-            potential_ctrls.extend(ctrl_sample_list)
-            
-        # 2. Find the first control sample that actually exists in the data
-        available_samples = df['sample'].unique()
-        valid_ctrl_name = None
-        
-        for candidate in potential_ctrls:
-            if candidate in available_samples:
-                valid_ctrl_name = candidate
-                break
-                
-        # 3. Handle the case where NO valid controls are found
-        if not valid_ctrl_name:
-            print(f"⚠️ None of the control samples {potential_ctrls} were found in population '{pop_name or getattr(self, 'active_pop', 'Unknown')}'. Cannot run PRI analysis.")
-            return
-
-        # 4. Announce which control is being used and slice the dataframe
-        print(f"✅ Using control sample '{valid_ctrl_name}' for PRI analysis thresholding.")
-        ctrl = df.loc[df["sample"] == valid_ctrl_name].copy()
-
-        if threshold_log is not None:
-            thr_log = float(threshold_log)
-            print(f"✅ Using user-supplied threshold (log1p scale): {thr_log:.4f}")
-        else:
-            thr_log = float(np.quantile(np.log1p(_coerce_nonneg(ctrl[channel]).values), float(np.clip(1.0 - pos_frac, 0.0, 1.0))))
-            print(f"   Auto threshold from control top {pos_frac*100:.1f}% quantile: {thr_log:.4f} (log1p)")
-
         _VALID_MFI_METRICS = {'geometric_mean', 'median'}
         if mfi_metric not in _VALID_MFI_METRICS:
             raise ValueError(
@@ -1754,137 +1764,203 @@ class FlowExperiment:
             raise ValueError(
                 f"flatline_threshold must be in [0, 1], got {flatline_threshold!r}"
             )
-        _mfi_fn = median_mfi if mfi_metric == 'median' else geometric_mfi
+        if samples is None: samples = df['sample'].unique().tolist()
 
-        # 5. Calculate Reference Baseline if provided
-        ref_pri_abs0 = None
-        if reference_sample:
-            if reference_sample not in available_samples:
-                print(f"⚠️ Reference sample '{reference_sample}' not found. Falling back to self-normalization.")
-            else:
-                ref_sub = df[(df["sample"] == reference_sample) & (df["time"] == baseline_time)].copy()
-                if ref_sub.empty:
-                    print(f"⚠️ Baseline time {baseline_time} not found for reference '{reference_sample}'. Falling back to self-normalization.")
-                else:
-                    # FIX: Pass the Pandas Series into _coerce_nonneg, then extract .values
-                    ref_vals = _coerce_nonneg(ref_sub[channel]).values
-                    ref_log = np.log1p(ref_vals)
-                    ref_n_pos = int(np.sum(ref_log >= thr_log))
-                    ref_f_plus = (ref_n_pos / ref_vals.size) if ref_vals.size else 0.0
-                    ref_gmfi = _mfi_fn(ref_vals[ref_log >= thr_log]) if ref_n_pos else 0.0
-                    ref_pri_abs0 = ref_f_plus * ref_gmfi
-                    
-                    if not np.isfinite(ref_pri_abs0) or ref_pri_abs0 <= 0:
-                        print(f"⚠️ Invalid baseline PRI for reference '{reference_sample}'. Falling back to self-normalization.")
-                        ref_pri_abs0 = None
-                    else:
-                        print(f"✅ Normalizing all samples to reference '{reference_sample}' at baseline time {baseline_time}.")
+        _kw = dict(
+            channel=channel, control_sample=control_sample, samples=samples,
+            pos_frac=pos_frac, baseline_time=baseline_time,
+            n_bootstrap=n_bootstrap, confidence=confidence,
+            ctrl_sample_list=ctrl_sample_list, reference_sample=reference_sample,
+            threshold_log=threshold_log, mfi_metric=mfi_metric,
+            flatline_threshold=flatline_threshold, flatline_z=flatline_z,
+            wt_sample=wt_sample, temperature_c=temperature_c, random_state=random_state,
+        )
 
-        tables = []
-        for s in samples:
-            sub = df.loc[df["sample"] == s].copy()
-            if sub.empty: continue
-            sub[channel] = _coerce_nonneg(sub[channel])
-            times = sorted(pd.unique(sub["time"]))
-            
-            # Calculate self-baseline gMFI (needed if falling back to self-normalization)
-            t0_vals = sub.loc[sub["time"] == baseline_time, channel].values
-            t0_pos_mask = np.log1p(t0_vals) >= thr_log
-            gmfi0 = _mfi_fn(t0_vals[t0_pos_mask])
-
-            for t in times:
-                vals = sub.loc[sub["time"] == t, channel].values
-                log_vals = np.log1p(vals)
-                n_pos = int(np.sum(log_vals >= thr_log))
-                f_plus = (n_pos / vals.size) if vals.size else 0.0
-                
-                gmfi_pos = _mfi_fn(vals[log_vals >= thr_log]) if n_pos else 0.0
-                PRI_abs = f_plus * gmfi_pos
-                
-                # Choose normalization method based on reference availability
-                if ref_pri_abs0 is not None:
-                    # New: Normalize total PRI to reference sample's baseline PRI
-                    PRI_norm = (PRI_abs / ref_pri_abs0) if np.isfinite(PRI_abs) else np.nan
-                else:
-                    # Old: Normalize only the gMFI to the sample's own baseline
-                    gmfi_pos_norm = (gmfi_pos / gmfi0) if (n_pos and np.isfinite(gmfi0) and gmfi0 > 0) else (0.0 if not n_pos else np.nan)
-                    PRI_norm = (f_plus * gmfi_pos_norm) if np.isfinite(gmfi_pos_norm) else np.nan
-
-                row = dict(
-                    sample=s, time=float(t), 
-                    PRI_abs=PRI_abs,
-                    PRI_norm=PRI_norm,
-                    n_events=len(vals),
-                    n_positive=n_pos
-                )
-                
-                # Bootstrap confidence intervals (only for PRI_abs currently)
-                if n_bootstrap > 0 and len(vals) > 10:
-                    pri_samples = []
-                    rng = np.random.default_rng(seed=42)
-                    for _ in range(n_bootstrap):
-                        boot_idx = rng.choice(len(vals), len(vals), replace=True)
-                        boot_vals = vals[boot_idx]
-                        boot_log = np.log1p(boot_vals)
-                        boot_n_pos = np.sum(boot_log >= thr_log)
-                        boot_f_plus = boot_n_pos / len(boot_vals)
-                        boot_gmfi = _mfi_fn(boot_vals[boot_log >= thr_log]) if boot_n_pos else 0.0
-                        pri_samples.append(boot_f_plus * boot_gmfi)
-                    
-                    alpha = (1 - confidence) / 2
-                    row['PRI_abs_ci_low'] = np.percentile(pri_samples, alpha * 100)
-                    row['PRI_abs_ci_high'] = np.percentile(pri_samples, (1 - alpha) * 100)
-                
-                tables.append(row)
-        
-        self.pri_table = pd.DataFrame(tables).sort_values(["sample","time"]).reset_index(drop=True)
-        self.pri_fits_abs = self._fit_global_exponential(self.pri_table, "PRI_abs",
-                                                          flatline_threshold=flatline_threshold)
-        self.pri_fits_norm = self._fit_global_exponential(self.pri_table, "PRI_norm",
-                                                           flatline_threshold=flatline_threshold)
-
-        # ΔΔG‡ via Transition State Theory (pre-exponential terms cancel at same T)
-        if wt_sample is not None:
-            _R_KCAL = 0.001987204258  # kcal / (mol·K)
-            _T_K = temperature_c + 273.15
-            _wt = self.pri_fits_norm[self.pri_fits_norm['sample'] == wt_sample]
-            if _wt.empty:
-                print(f"⚠️ wt_sample '{wt_sample}' not found in pri_fits_norm; skipping ΔΔG‡.")
-            else:
-                _t_half_wt = _wt['t_half'].values[0]
-                _t_half_wt_err = _wt['t_half_err'].values[0]
-                if not np.isfinite(_t_half_wt) or _t_half_wt <= 0:
-                    print(f"⚠️ wt_sample '{wt_sample}' has invalid t_half={_t_half_wt}; skipping ΔΔG‡.")
-                else:
-                    _rel_err_wt = ((_t_half_wt_err / _t_half_wt) ** 2
-                                   if pd.notna(_t_half_wt_err) and _t_half_wt_err > 0 else 0.0)
-                    with np.errstate(divide='ignore', invalid='ignore'):
-                        self.pri_fits_norm['ddG_kin'] = (
-                            _R_KCAL * _T_K
-                            * np.log(self.pri_fits_norm['t_half'] / _t_half_wt)
-                        )
-                        _rel_err_mut = (self.pri_fits_norm['t_half_err']
-                                        / self.pri_fits_norm['t_half']) ** 2
-                        self.pri_fits_norm['ddG_kin_err'] = (
-                            _R_KCAL * _T_K * np.sqrt(_rel_err_mut + _rel_err_wt)
-                        )
-                    print(f"✅ ΔΔG‡ calculated relative to '{wt_sample}' at {temperature_c}°C.")
+        use_per_plate = per_plate and ('dataset' in df.columns) and (df['dataset'].nunique() > 1)
+        if use_per_plate:
+            tables, fits_abs, fits_norm, ctrls = [], [], [], []
+            for ds in sorted(df['dataset'].dropna().unique()):
+                sub = df[df['dataset'] == ds]
+                print(f"── Plate '{ds}' ──")
+                result = self._pri_single(sub, scope_label=str(ds), **_kw)
+                if result is None:
+                    continue
+                t_ds, fa_ds, fn_ds, ctrl_name = result
+                for _d in (t_ds, fa_ds, fn_ds):
+                    _d['dataset'] = ds
+                tables.append(t_ds); fits_abs.append(fa_ds); fits_norm.append(fn_ds)
+                ctrls.append(ctrl_name)
+            if not tables:
+                print("⚠️ No plate could be analysed (no valid control found). Aborting.")
+                return
+            self.pri_table = pd.concat(tables, ignore_index=True)
+            self.pri_fits_abs = pd.concat(fits_abs, ignore_index=True)
+            self.pri_fits_norm = pd.concat(fits_norm, ignore_index=True)
+            self.pri_control_sample = ctrls[0] if len(set(ctrls)) == 1 else dict(
+                zip(sorted(df['dataset'].dropna().unique()), ctrls))
+        else:
+            result = self._pri_single(df, scope_label=None, **_kw)
+            if result is None:
+                return
+            self.pri_table, self.pri_fits_abs, self.pri_fits_norm, self.pri_control_sample = result
 
         self.pri_channel = channel
         self.pri_pop = pop_name or self.active_pop
-        self.pri_control_sample = valid_ctrl_name
-        
-        # Calculate and store residuals directly into the main table
+
+        # Residuals (dataset-aware when per-plate)
         self.pri_table['PRI_abs_fit_res'] = self._compute_residuals(self.pri_table, self.pri_fits_abs, 'PRI_abs')
         self.pri_table['PRI_norm_fit_res'] = self._compute_residuals(self.pri_table, self.pri_fits_norm, 'PRI_norm')
+        print(f"✅ PRI Analysis Complete on '{pop_name or getattr(self, 'active_pop', 'Unknown')}' "
+              f"with {n_bootstrap} bootstrap iterations{' (per-plate)' if use_per_plate else ''}.")
 
-        print(f"✅ PRI Analysis Complete on '{pop_name or getattr(self, 'active_pop', 'Unknown')}' with {n_bootstrap} bootstrap iterations.")
+    def _pri_single(self, df, channel, control_sample, samples, pos_frac, baseline_time,
+                    n_bootstrap, confidence, ctrl_sample_list, reference_sample,
+                    threshold_log, mfi_metric, flatline_threshold, flatline_z,
+                    wt_sample, temperature_c, random_state, scope_label=None):
+        """Compute the PRI table + global-exponential fits for one data scope
+        (the whole experiment, or a single plate when called per-dataset).
+        Returns (pri_table, fits_abs, fits_norm, control_name) or None."""
+
+        scope = f" [{scope_label}]" if scope_label else ""
+
+        # 1. Prioritised control list → first one present in this scope
+        potential_ctrls = [control_sample] + list(ctrl_sample_list or [])
+        available_samples = df['sample'].unique()
+        valid_ctrl_name = next((c for c in potential_ctrls if c in available_samples), None)
+        if not valid_ctrl_name:
+            print(f"⚠️ None of the control samples {potential_ctrls} were found{scope}. Skipping.")
+            return None
+
+        print(f"✅ Using control '{valid_ctrl_name}' for thresholding{scope}.")
+        ctrl = df.loc[df["sample"] == valid_ctrl_name]
+
+        if threshold_log is not None:
+            thr_log = float(threshold_log)
+            print(f"✅ Using user-supplied threshold (log1p scale): {thr_log:.4f}")
+        else:
+            thr_log = float(np.quantile(np.log1p(_coerce_nonneg(ctrl[channel]).values),
+                                        float(np.clip(1.0 - pos_frac, 0.0, 1.0))))
+            print(f"   Auto threshold from control top {pos_frac*100:.1f}% quantile: {thr_log:.4f} (log1p)")
+
+        _mfi_fn = median_mfi if mfi_metric == 'median' else geometric_mfi
+
+        def _pri_from_vals(vals, gmfi0, ref_abs0):
+            """Return (PRI_abs, PRI_norm, n_pos) for a 1-D array of channel values."""
+            log_vals = np.log1p(vals)
+            pos = log_vals >= thr_log
+            n_pos = int(np.sum(pos))
+            f_plus = (n_pos / vals.size) if vals.size else 0.0
+            gmfi_pos = _mfi_fn(vals[pos]) if n_pos else 0.0
+            pri_abs = f_plus * gmfi_pos
+            if ref_abs0 is not None:
+                pri_norm = (pri_abs / ref_abs0) if np.isfinite(pri_abs) else np.nan
+            else:
+                gmfi_norm = ((gmfi_pos / gmfi0) if (n_pos and np.isfinite(gmfi0) and gmfi0 > 0)
+                             else (0.0 if not n_pos else np.nan))
+                pri_norm = (f_plus * gmfi_norm) if np.isfinite(gmfi_norm) else np.nan
+            return pri_abs, pri_norm, n_pos
+
+        # 2. Reference baseline (e.g. this plate's Wild-Type at t0)
+        ref_pri_abs0 = None
+        if reference_sample:
+            if reference_sample not in available_samples:
+                print(f"⚠️ Reference '{reference_sample}' not found{scope}. Falling back to self-normalization.")
+            else:
+                ref_sub = df[(df["sample"] == reference_sample) & (df["time"] == baseline_time)]
+                if ref_sub.empty:
+                    print(f"⚠️ Baseline time {baseline_time} missing for reference '{reference_sample}'{scope}. Self-normalizing.")
+                else:
+                    ref_vals = _coerce_nonneg(ref_sub[channel]).values
+                    ref_pri_abs0 = _pri_from_vals(ref_vals, np.nan, None)[0]
+                    if not np.isfinite(ref_pri_abs0) or ref_pri_abs0 <= 0:
+                        print(f"⚠️ Invalid baseline PRI for reference '{reference_sample}'{scope}. Self-normalizing.")
+                        ref_pri_abs0 = None
+                    else:
+                        print(f"✅ Normalizing to reference '{reference_sample}' at t={baseline_time}{scope}.")
+
+        rng = np.random.default_rng(random_state)
+        alpha = (1 - confidence) / 2
+        tables = []
+        for s in samples:
+            sub = df.loc[df["sample"] == s]
+            if sub.empty:
+                continue
+            vals_by_time = {t: _coerce_nonneg(g[channel]).values for t, g in sub.groupby("time")}
+
+            if baseline_time not in vals_by_time:
+                warnings.warn(
+                    f"Sample '{s}'{scope} has no baseline time {baseline_time}; "
+                    f"self-normalized PRI_norm will be NaN for it.",
+                    UserWarning, stacklevel=3,
+                )
+                gmfi0 = np.nan
+            else:
+                t0v = vals_by_time[baseline_time]
+                gmfi0 = _mfi_fn(t0v[np.log1p(t0v) >= thr_log]) if t0v.size else np.nan
+
+            for t in sorted(vals_by_time):
+                vals = vals_by_time[t]
+                PRI_abs, PRI_norm, n_pos = _pri_from_vals(vals, gmfi0, ref_pri_abs0)
+                row = dict(sample=s, time=float(t), PRI_abs=PRI_abs, PRI_norm=PRI_norm,
+                           n_events=len(vals), n_positive=n_pos)
+
+                # Bootstrap CIs + standard errors for BOTH metrics (single RNG stream)
+                if n_bootstrap > 0 and len(vals) > 10:
+                    boot_abs, boot_norm = np.empty(n_bootstrap), np.empty(n_bootstrap)
+                    for b in range(n_bootstrap):
+                        bv = vals[rng.integers(0, len(vals), len(vals))]
+                        boot_abs[b], boot_norm[b], _ = _pri_from_vals(bv, gmfi0, ref_pri_abs0)
+                    row['PRI_abs_ci_low'] = float(np.nanpercentile(boot_abs, alpha * 100))
+                    row['PRI_abs_ci_high'] = float(np.nanpercentile(boot_abs, (1 - alpha) * 100))
+                    row['PRI_abs_se'] = float(np.nanstd(boot_abs, ddof=1))
+                    row['PRI_norm_ci_low'] = float(np.nanpercentile(boot_norm, alpha * 100))
+                    row['PRI_norm_ci_high'] = float(np.nanpercentile(boot_norm, (1 - alpha) * 100))
+                    row['PRI_norm_se'] = float(np.nanstd(boot_norm, ddof=1))
+                tables.append(row)
+
+        pri_table = pd.DataFrame(tables).sort_values(["sample", "time"]).reset_index(drop=True)
+        fits_abs = self._fit_global_exponential(pri_table, "PRI_abs",
+                                                flatline_threshold=flatline_threshold, flatline_z=flatline_z)
+        fits_norm = self._fit_global_exponential(pri_table, "PRI_norm",
+                                                 flatline_threshold=flatline_threshold, flatline_z=flatline_z)
+        fits_norm = self._add_ddg(fits_norm, wt_sample, temperature_c, scope)
+        return pri_table, fits_abs, fits_norm, valid_ctrl_name
+
+    @staticmethod
+    def _add_ddg(fits_norm: pd.DataFrame, wt_sample, temperature_c, scope=""):
+        """Append ΔΔG‡ (kinetic, kcal/mol) via TST: ΔΔG‡ = R·T·ln(t½ / t½_wt)."""
+        if wt_sample is None:
+            return fits_norm
+        _R_KCAL = 0.001987204258  # kcal / (mol·K)
+        _T_K = temperature_c + 273.15
+        _wt = fits_norm[fits_norm['sample'] == wt_sample]
+        if _wt.empty:
+            print(f"⚠️ wt_sample '{wt_sample}' not found in fits{scope}; skipping ΔΔG‡.")
+            return fits_norm
+        _t_half_wt = _wt['t_half'].values[0]
+        _t_half_wt_err = _wt['t_half_err'].values[0]
+        if not np.isfinite(_t_half_wt) or _t_half_wt <= 0:
+            print(f"⚠️ wt_sample '{wt_sample}' has invalid t_half={_t_half_wt}{scope}; skipping ΔΔG‡.")
+            return fits_norm
+        _rel_err_wt = ((_t_half_wt_err / _t_half_wt) ** 2
+                       if pd.notna(_t_half_wt_err) and _t_half_wt_err > 0 else 0.0)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            fits_norm['ddG_kin'] = _R_KCAL * _T_K * np.log(fits_norm['t_half'] / _t_half_wt)
+            _rel_err_mut = (fits_norm['t_half_err'] / fits_norm['t_half']) ** 2
+            fits_norm['ddG_kin_err'] = _R_KCAL * _T_K * np.sqrt(_rel_err_mut + _rel_err_wt)
+        print(f"✅ ΔΔG‡ calculated relative to '{wt_sample}' at {temperature_c}°C{scope}.")
+        return fits_norm
 
     def _compute_residuals(self, df: pd.DataFrame, fits: pd.DataFrame, which: str) -> List[float]:
+        # Match on (sample, dataset) when per-plate, so a sample measured on several
+        # plates is scored against its own plate's fit.
+        by_dataset = 'dataset' in df.columns and 'dataset' in fits.columns
         res_list = []
         for _, row in df.iterrows():
             s, t, y_true = row['sample'], row['time'], row[which]
             fit_row = fits[fits['sample'] == s]
+            if by_dataset:
+                fit_row = fit_row[fit_row['dataset'] == row['dataset']]
             if not fit_row.empty and pd.notna(y_true):
                 A, k, C = fit_row.iloc[0]['A'], fit_row.iloc[0]['k'], fit_row.iloc[0]['C']
                 y_pred = A * np.exp(-k * t) + C
@@ -1894,7 +1970,21 @@ class FlowExperiment:
         return res_list
 
     def _fit_global_exponential(self, df_source: pd.DataFrame, which: str,
-                                 flatline_threshold: float = 0.10) -> pd.DataFrame:
+                                 flatline_threshold: float = 0.10,
+                                 flatline_z: float = 2.0) -> pd.DataFrame:
+        """Fit y(t) = A_s·exp(-k_s·t) + C with a single shared baseline C.
+
+        The shared C is physically justified: at full denaturation the only signal
+        above the control-derived 99th-percentile threshold is the fixed
+        autofluorescence / non-specific-binding background, which is a property of
+        the cell line + antibody and therefore the *same absolute value* for every
+        sample. Because the samples span very different absolute amplitudes
+        (expression), the fit is **weighted** (residuals divided by each point's
+        standard error, falling back to 1/|y| relative weighting) so that the
+        brightest sample cannot dominate the shared-C estimate and bias the k of
+        dimmer samples. `k` is scale-invariant, so weighting changes only the
+        estimator's efficiency, not the underlying model.
+        """
         all_samples = sorted(df_source['sample'].unique())
         times_list_all, values_list_all = [], []
         for s in all_samples:
@@ -1927,28 +2017,37 @@ class FlowExperiment:
         ]
 
         # --- Flatline / hyperstable detection ---
-        # A sample is hyperstable if the normalised linear-regression decay rate
-        # (slope / mean_signal) is below flatline_threshold per unit time scaled
-        # by the time span.  This is robust to per-timepoint noise that would
-        # fool a simple first-to-last comparison.
+        # A sample is hyperstable if its decay is BOTH small (normalised total drop
+        # over the time span < flatline_threshold) AND not statistically
+        # distinguishable from no decay (linear slope within flatline_z standard
+        # errors of zero). Requiring statistical insignificance prevents a genuine
+        # but slow decay from being silently erased (reported as t_half = inf).
         _eps_flat = 1e-12
         flatline_samples = []
         normal_samples, normal_times, normal_values = [], [], []
         for _s, _t, _v in zip(samples, times_list, values_list):
             _mask = np.isfinite(_v)
             _vf, _tf = _v[_mask], _t[_mask]
-            if _vf.size > 1:
+            _is_flat = False
+            if _vf.size > 1 and (_tf.max() - _tf.min()) > _eps_flat:
                 _mean_v = np.mean(np.abs(_vf))
-                if _mean_v > _eps_flat:
-                    _slope = np.polyfit(_tf, _vf, 1)[0]
-                    _span = max(_tf[-1] - _tf[0], _eps_flat)
-                    # Normalised total drop over time span, relative to mean signal
-                    _drop = -_slope * _span / (_mean_v + _eps_flat)
+                if _mean_v <= _eps_flat:
+                    _is_flat = True  # all zeros → treat as flatline
                 else:
-                    _drop = 0.0  # all zeros → treat as flatline
-            else:
-                _drop = 1.0  # zero or one finite point — cannot fit slope; treat as normal
-            if 0.0 <= _drop < flatline_threshold:
+                    _span = max(_tf[-1] - _tf[0], _eps_flat)
+                    # Slope + its standard error via a covariance-aware linear fit
+                    if _vf.size >= 3:
+                        _coef, _cov = np.polyfit(_tf, _vf, 1, cov=True)
+                        _slope = _coef[0]
+                        _slope_se = float(np.sqrt(_cov[0, 0])) if np.isfinite(_cov[0, 0]) else 0.0
+                    else:
+                        _slope = np.polyfit(_tf, _vf, 1)[0]
+                        _slope_se = 0.0
+                    _drop = -_slope * _span / (_mean_v + _eps_flat)
+                    _slope_significant = _slope_se > 0 and abs(_slope) > flatline_z * _slope_se
+                    _is_flat = (0.0 <= _drop < flatline_threshold) and not _slope_significant
+            # zero/one finite point, or a real & significant decay → fit normally
+            if _is_flat:
                 flatline_samples.append(_s)
             else:
                 normal_samples.append(_s)
@@ -1972,18 +2071,47 @@ class FlowExperiment:
                 min_vals.append(mv if not np.isnan(mv) else 1e-6)
         C0 = max(np.mean(min_vals) if min_vals else 0.0, 1e-4)
 
+        # Sane upper bound on k derived from the time resolution: the fastest
+        # decay the sampling can resolve has a half-life no shorter than a fraction
+        # of the smallest positive inter-timepoint gap. The old fixed 1e7 cap was
+        # ~14 orders of magnitude faster than any real measurement.
+        _all_t = np.concatenate([t for t in times_list if len(t)]) if times_list else np.array([0.0])
+        _uniq_t = np.unique(_all_t[np.isfinite(_all_t)])
+        _min_gap = np.min(np.diff(_uniq_t)) if _uniq_t.size >= 2 else 1.0
+        _min_gap = _min_gap if (np.isfinite(_min_gap) and _min_gap > 0) else 1.0
+        k_upper = float(np.clip(np.log(2) / (0.1 * _min_gap), 1.0, 1e6))
+
+        # Per-point fit weights (1/standard-error). Prefer bootstrap SE columns when
+        # available; otherwise fall back to relative (1/|y|) weighting so the fit is
+        # scale-robust even without bootstrap. NaN/inf points get zero weight.
+        se_col = f"{which}_se"
+        weights_list = []
+        for s, tt, yy in zip(samples, times_list, values_list):
+            if se_col in df_source.columns:
+                _g = df_source[df_source['sample'] == s].sort_values('time')
+                _se = pd.to_numeric(_g[se_col], errors='coerce').values
+                _w = np.where(np.isfinite(_se) & (_se > 0), 1.0 / np.where(_se > 0, _se, 1.0), np.nan)
+            else:
+                _w = np.full(np.shape(yy), np.nan, dtype=float)
+            _rel = 1.0 / np.maximum(np.abs(yy), 1e-9)
+            _w = np.where(np.isfinite(_w), _w, _rel)
+            _w = np.where(np.isfinite(yy), _w, 0.0)  # drop non-finite y from the fit
+            weights_list.append(_w)
+
         initial_params, bounds_lower, bounds_upper = [C0], [0.0], [1.0 if which == 'PRI_norm' else np.inf]
         for i in range(len(samples)):
             y, t = values_list[i], times_list[i]
             A0 = max(np.nanmax(y) if len(y) > 0 else 0, 1e-9)
-            k0 = np.log(2) / (np.median(t[t > 0]) if np.any(t > 0) else 1.0)
-            initial_params.extend([A0, k0]); bounds_lower.extend([0.0, 1e-8]); bounds_upper.extend([np.inf, 1e7])
+            _tpos = t[t > 0]
+            k0 = float(np.clip(np.log(2) / (np.median(_tpos) if _tpos.size else 1.0), 1e-8, k_upper))
+            initial_params.extend([A0, k0]); bounds_lower.extend([0.0, 1e-8]); bounds_upper.extend([np.inf, k_upper])
 
         def residuals(params):
             C, res = params[0], []
             for i in range(len(samples)):
                 A, k = params[1+2*i], params[2+2*i]
-                res.extend(values_list[i] - (A * np.exp(-k * times_list[i]) + C))
+                rr = (values_list[i] - (A * np.exp(-k * times_list[i]) + C)) * weights_list[i]
+                res.extend(np.where(np.isfinite(rr), rr, 0.0))
             return np.array(res)
 
         res = least_squares(residuals, initial_params, bounds=(bounds_lower, bounds_upper), method='trf')
@@ -2065,10 +2193,22 @@ class FlowExperiment:
                 spine_width: float = None):
         if self.pri_table.empty: return
         data = self.pri_table.copy()
+        fits_df = self.pri_fits_norm if which == "PRI_norm" else self.pri_fits_abs
         if dataset is not None and 'dataset' in data.columns:
             data = data[data['dataset'] == dataset]
-        samples = sorted(data["sample"].unique())
-        rows = int(np.ceil(len(samples) / cols))
+            if 'dataset' in fits_df.columns:
+                fits_df = fits_df[fits_df['dataset'] == dataset]
+        # One panel per sample, or per (sample, plate) when >1 plate is present
+        by_ds = ('dataset' in data.columns and 'dataset' in fits_df.columns
+                 and data['dataset'].nunique() > 1)
+        if by_ds:
+            panel_keys = sorted(
+                {(str(a), str(b)) for a, b in
+                 data[['sample', 'dataset']].drop_duplicates().itertuples(index=False)}
+            )
+        else:
+            panel_keys = [(s, None) for s in sorted(data["sample"].unique())]
+        rows = int(np.ceil(len(panel_keys) / cols))
 
         panel_w = 3.5
         panel_h = 2.8 if not plot_residuals else 3.5
@@ -2079,7 +2219,6 @@ class FlowExperiment:
         outer_gs = fig.add_gridspec(rows, cols, wspace=0.38, hspace=0.55 if plot_residuals else 0.48)
 
         tgrid = np.linspace(np.nanmin(data["time"]), np.nanmax(data["time"]), 300)
-        fits_df = self.pri_fits_norm if which == "PRI_norm" else self.pri_fits_abs
 
         # Global Y limits — shared across all panels for easy comparison
         y_min = data[which].min()
@@ -2105,8 +2244,9 @@ class FlowExperiment:
         _ALL_PARAMS = ['t_half', 'y0', 'r2']
         _show = set(show_params if show_params is not None else _ALL_PARAMS)
 
-        for i, s in enumerate(samples):
+        for i, (s, ds) in enumerate(panel_keys):
             r, c = divmod(i, cols)
+            panel_title = s if ds is None else f"{s}\n({ds})"
             inner_gs = outer_gs[r, c].subgridspec(
                 nrows=2 if plot_residuals else 1,
                 ncols=1,
@@ -2117,14 +2257,18 @@ class FlowExperiment:
             if plot_residuals:
                 ax_res = fig.add_subplot(inner_gs[1], sharex=ax)
 
-            g = data[data["sample"] == s].sort_values("time")
+            g = data[data["sample"] == s]
+            fit_row = fits_df[fits_df["sample"] == s]
+            if ds is not None:
+                g = g[g["dataset"] == ds]
+                fit_row = fit_row[fit_row["dataset"] == ds]
+            g = g.sort_values("time")
 
             # Data markers: filled, white edge for crispness
             ax.plot(g["time"].values, g[which].values, "o",
                     color=_SCATTER_COLOR, markeredgecolor='white', markeredgewidth=0.8,
                     markersize=6.5, alpha=0.95, zorder=3, label="Data")
 
-            fit_row = fits_df[fits_df["sample"] == s]
             if not fit_row.empty and np.isfinite(fit_row["t_half"].values[0]):
                 A = fit_row["A"].values[0]
                 k = fit_row["k"].values[0]
@@ -2182,10 +2326,10 @@ class FlowExperiment:
                 ax.tick_params(labelbottom=False)
                 self._style_ax(ax_res, xlabel="Time (min)", ylabel="Resid.",
                                spine_width=spine_width)
-                self._style_ax(ax, ylabel=which.replace("_", " "), title=s,
+                self._style_ax(ax, ylabel=which.replace("_", " "), title=panel_title,
                                spine_width=spine_width)
             else:
-                self._style_ax(ax, xlabel="Time (min)", ylabel=which.replace("_", " "), title=s,
+                self._style_ax(ax, xlabel="Time (min)", ylabel=which.replace("_", " "), title=panel_title,
                                spine_width=spine_width)
 
         if title:
