@@ -5,6 +5,46 @@ Versioning follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [0.6.0] - 2026-07-06
+### Fixed (affects numerical results)
+- **Robust parameter covariance.** `_fit_global_exponential` now derives parameter
+  standard errors from the **SVD of the Jacobian** instead of `mse · pinv(JᵀJ)`.
+  Forming `JᵀJ` squared the condition number and, whenever a parameter was pinned at
+  a bound (rank-deficient Jacobian), produced tiny-negative "variances" →
+  `invalid value encountered in sqrt` → silently-`NaN` `k_err`/`t_half_err`/
+  `ddG_kin_err`. The new path never yields a negative variance; genuinely
+  unidentifiable parameters (≈zero Jacobian column) are reported as `inf` rather
+  than a falsely-precise `0`. **Point estimates (`A`, `k`, `t_half`) are unchanged;
+  only the reported errors change.**
+- **Covariance scaling now matches the weighting.** When the fit is weighted by
+  bootstrap standard errors (absolute σ), the covariance is used as-is; only the
+  relative `1/|y|` fallback rescales by the reduced-χ² (`absolute_sigma` semantics,
+  as in `scipy.optimize.curve_fit`). Previously the covariance was always rescaled,
+  so error bars ignored the magnitude of the bootstrap SEs.
+- **Bounded fit weights.** Each time-point's weight is capped within its sample at
+  `10×` the sample median (`_WEIGHT_CAP_FACTOR`). A single well with an anomalously
+  small bootstrap SE (or near-zero signal in the fallback path) could otherwise
+  dominate the shared-`C` fit and bias `k` — the exact failure the weighting was
+  meant to prevent. Capping is per-sample, so cross-sample scaling is preserved.
+- **Samples with < 3 *finite* PRI points are now skipped** (previously < 3 *time*
+  points). This also fixes a crash (`Initial guess is outside of provided bounds`)
+  when a control with no positive events at baseline produced an all-`NaN`
+  self-normalized `PRI_norm`.
+
+### Changed (affects numerical results)
+- **Unified `PRI_norm` normalization.** Self-normalized `PRI_norm` is now
+  `PRI_abs(t) / PRI_abs(t₀)` for the sample's own baseline — the *same ratio form*
+  as reference-normalized mode (`PRI_abs / PRI_abs_ref(t₀)`). Both now equal **1 at
+  baseline** and read directly as a retained fraction of prefusion signal.
+  Previously self-mode returned `f₊(t) · gMFI(t)/gMFI(t₀)`, which started at `f₊(t₀)`
+  (not 1) and was not comparable to reference mode. **Self-normalized `PRI_norm`
+  values (the default when no `reference_sample` is given) will change.**
+
+### Documentation
+- Documented that bootstrap CIs/SEs reflect **within-well event-sampling noise only**
+  (a lower bound on true uncertainty), and that `ddG_kin_err` treats the mutant and
+  WT half-lives as independent (ignores their shared-fit correlation).
+
 ## [0.5.0] - 2026-07-06
 ### Changed (affects numerical results)
 - **Weighted global exponential fit.** `_fit_global_exponential` now weights each

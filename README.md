@@ -161,6 +161,35 @@ exp.plot_sliced_histogram('RL1-H', slice_by='sample', filter_col='time', filter_
 exp.run_pri_analysis('RL1-H', control_sample='Ctrl', threshold_log=5.5)
 ```
 
+### Normalization modes (`PRI_norm`)
+
+`PRI_abs(t) = f₊(t) · MFI₊(t)` is the fraction of positive events times their
+(geometric or median) MFI — an integrated prefusion signal. `PRI_norm` is that
+signal expressed as a **retained fraction of the baseline**, and is always the same
+ratio in both modes:
+
+| Mode | Denominator | `PRI_norm` at baseline |
+|------|-------------|------------------------|
+| **Reference** (`reference_sample='Fwt'`) | the reference sample's `PRI_abs(t₀)` | `1` for the reference |
+| **Self** (no `reference_sample`) | the sample's *own* `PRI_abs(t₀)` | `1` for every sample |
+
+> **Changed in 0.6.0.** Self-normalized `PRI_norm` is now `PRI_abs(t)/PRI_abs(t₀)`
+> (baseline = 1), matching reference mode. It previously started at `f₊(t₀)` and was
+> not comparable across modes, so self-normalized values differ from ≤ 0.5.x.
+
+### Uncertainty & interpretation
+
+- **Bootstrap CIs/SEs** (`PRI_*_ci_low/high`, `PRI_*_se`) resample **events within
+  each well**, so they capture only the sampling noise of each per-well MFI. They do
+  **not** include replicate / plate / biological variance — treat them as a *lower
+  bound* on the true uncertainty.
+- **Fit errors** (`k_err`, `t_half_err`, `C_err`) come from the SVD of the fit
+  Jacobian. Parameters that are unidentifiable (e.g. pinned at a bound) report `inf`
+  rather than a spuriously precise `0`.
+- **`ddG_kin_err`** propagates t½(mutant) and t½(WT) as independent; because all
+  samples share one fitted baseline `C`, their half-lives are actually correlated, so
+  treat ΔΔG‡ error bars as indicative.
+
 ### Advanced PRI Analysis
 
 ```python

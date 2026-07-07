@@ -408,6 +408,104 @@ try:
 except Exception as ex:
     check("per_plate: plotting runs without error", False, str(ex))
 
+# ── 17. Robust covariance — no negative-sqrt, non-negative errors ──────────────
+print("\n[17] Robust covariance (no negative sqrt)")
+# Rank-deficient Jacobians (parameters pinned at bounds) previously made
+# pinv(JᵀJ) return tiny-negative variances → 'invalid value in sqrt' → NaN errors.
+# The per-plate multi-gain layout reliably reproduces that pathology.
+_rng17 = np.random.default_rng(11)
+_rows17 = []
+_times17 = [0, 1, 3, 5, 10, 20, 30]
+for _plate, _gain in [('P1', 1.0), ('P2', 3.0)]:
+    for _name, _A, _k in [('Fwt', 400.0, 0.04), ('Mut', 300.0, 0.10)]:
+        for _t in _times17:
+            _mu = _gain * (_A * np.exp(-_k * _t) + 15)
+            for _v in _rng17.lognormal(np.log(_mu), 0.08, 300):
+                _rows17.append({'sample': _name, 'time': float(_t), 'RL1-H': float(_v),
+                                'well': f'{_plate}{_name}{_t}', 'dataset': _plate})
+    for _t in _times17:
+        for _v in _rng17.exponential(5 * _gain, 150):
+            _rows17.append({'sample': 'Ctrl', 'time': float(_t), 'RL1-H': float(_v),
+                            'well': f'{_plate}C{_t}', 'dataset': _plate})
+e17 = tf.FlowExperiment()
+e17.populations['raw'] = pd.DataFrame(_rows17); e17.active_pop = 'raw'
+with warnings.catch_warnings(record=True) as w:
+    warnings.simplefilter('always')
+    e17.run_pri_analysis('RL1-H', control_sample='Ctrl', reference_sample='Fwt',
+                         wt_sample='Fwt', per_plate=True)
+    bad_sqrt = any('invalid value encountered in sqrt' in str(x.message) for x in w)
+    cov_failed = any('Covariance estimation failed' in str(x.message) for x in w)
+check("no 'invalid value encountered in sqrt' warning", not bad_sqrt)
+check("covariance estimation did not fall back to NaN", not cov_failed)
+for _col in ('A_err', 'k_err', 'C_err', 't_half_err'):
+    _vals = e17.pri_fits_norm[_col].values
+    _finite = _vals[np.isfinite(_vals)]
+    check(f"{_col}: all finite values >= 0", np.all(_finite >= 0),
+          f"min={_finite.min() if _finite.size else 'n/a'}")
+
+# ── 18. absolute_sigma — parameter error scales with input SE ──────────────────
+print("\n[18] absolute_sigma covariance scaling")
+_ex = tf.FlowExperiment()
+_t = np.array([0, 1, 3, 5, 10, 20, 30], float)
+_y = 1000.0 * np.exp(-0.05 * _t) + 30.0  # exact exponential → residuals ~ 0
+
+
+def _fit_kerr(se_val):
+    _df = pd.DataFrame([dict(sample='S', time=t, PRI_abs=yv, PRI_abs_se=se_val)
+                        for t, yv in zip(_t, _y)])
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        _f = _ex._fit_global_exponential(_df, 'PRI_abs')
+    return float(_f['k_err'].iloc[0])
+
+
+_ke1, _ke10 = _fit_kerr(20.0), _fit_kerr(200.0)
+check("k_err reflects input SE (not ~0 from mse rescale)", _ke1 > 1e-6,
+      f"k_err={_ke1:.3e}")
+check("k_err scales ~linearly with SE (absolute_sigma)",
+      0.7 < (_ke10 / _ke1) / 10.0 < 1.4 if _ke1 else False,
+      f"ratio={_ke10/_ke1 if _ke1 else float('nan'):.3f} (want ~10)")
+
+# ── 19. Weight clipping — one tiny-SE point cannot dominate the fit ────────────
+print("\n[19] Fit weights are bounded")
+# One off-curve time-point (t=5, value tripled) carrying an absurdly small SE.
+# Uncapped, its ~1e8x weight dominates and drags the shared-C fit's k badly off.
+_exc = tf.FlowExperiment()
+_yo = _y.copy(); _yo[3] = _y[3] * 3.0
+_seo = np.full_like(_t, 20.0); _seo[3] = 1e-6
+_dfo = pd.DataFrame([dict(sample='S', time=t, PRI_abs=yv, PRI_abs_se=s)
+                     for t, yv, s in zip(_t, _yo, _seo)])
+
+
+def _fit_k_with_cap(cap):
+    _saved = tf._WEIGHT_CAP_FACTOR
+    tf._WEIGHT_CAP_FACTOR = cap
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            return float(_exc._fit_global_exponential(_dfo, 'PRI_abs')['k'].iloc[0])
+    finally:
+        tf._WEIGHT_CAP_FACTOR = _saved
+
+
+_k_unclipped = _fit_k_with_cap(np.inf)
+_k_clipped = _fit_k_with_cap(tf._WEIGHT_CAP_FACTOR)  # default cap
+check("weight cap reduces the outlier's bias on k",
+      abs(_k_clipped - 0.05) < abs(_k_unclipped - 0.05),
+      f"clipped={_k_clipped:.4f} vs unclipped={_k_unclipped:.4f} (true 0.05)")
+check("clipped k within 40% of truth", abs(_k_clipped - 0.05) / 0.05 < 0.40,
+      f"k={_k_clipped:.4f}")
+
+# ── 20. Self-normalized PRI_norm baseline == 1 (matches reference mode) ────────
+print("\n[20] Self-normalized PRI_norm baseline")
+e20 = make_experiment(n_events=200)
+e20.run_pri_analysis('RL1-H', control_sample='Ctrl', n_bootstrap=0)  # no reference
+_t0 = e20.pri_table[e20.pri_table['time'] == 0.0]
+_pn0 = _t0['PRI_norm'].dropna().values
+check("self-norm: every sample's PRI_norm(t0) ~ 1.0",
+      _pn0.size > 0 and np.allclose(_pn0, 1.0, atol=1e-9),
+      f"values={_pn0}")
+
 # ── Results ───────────────────────────────────────────────────────────────────
 print(f"\n{'='*50}")
 print(f"  Results: {PASS} passed, {FAIL} failed")

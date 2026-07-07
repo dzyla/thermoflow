@@ -1,4 +1,4 @@
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 import os
 import io
@@ -39,6 +39,11 @@ from numpy.linalg import inv, LinAlgError
 # Figure width constants (inches) — Nature journal column widths
 FIG_1COL = 3.46   # 88 mm — single column
 FIG_2COL = 7.09   # 180 mm — double column
+
+# Upper bound on a single time-point's fit weight, as a multiple of its sample's
+# median weight. Guards the shared-C global exponential fit against one well with
+# an anomalously small standard error (or near-zero signal) dominating the fit.
+_WEIGHT_CAP_FACTOR = 10.0
 
 mpl.rcParams.update({
     # --- Font ---
@@ -1732,6 +1737,13 @@ class FlowExperiment:
                          random_state: int = 42):
         """Enhanced PRI analysis with bootstrap confidence intervals and optional reference normalization.
 
+        .. note::
+           The bootstrap resamples **events within each well**, so the CIs and SEs
+           (``PRI_*_ci_low/high``, ``PRI_*_se``) quantify only the sampling noise of
+           each per-well MFI estimate. They do **not** capture replicate, plate, or
+           biological variability, which is usually larger — treat them as a lower
+           bound on the true uncertainty, not a replicate confidence interval.
+
         Parameters
         ----------
         per_plate : bool
@@ -1844,20 +1856,25 @@ class FlowExperiment:
 
         _mfi_fn = median_mfi if mfi_metric == 'median' else geometric_mfi
 
-        def _pri_from_vals(vals, gmfi0, ref_abs0):
-            """Return (PRI_abs, PRI_norm, n_pos) for a 1-D array of channel values."""
+        def _pri_from_vals(vals, base_abs0):
+            """Return (PRI_abs, PRI_norm, n_pos) for a 1-D array of channel values.
+
+            ``PRI_norm`` is always ``PRI_abs / base_abs0`` — the *same* ratio form for
+            both normalization modes. ``base_abs0`` is the reference sample's baseline
+            PRI_abs (reference mode) or the sample's own baseline PRI_abs (self mode),
+            so in either case PRI_norm == 1 at the baseline of its normalizer and is
+            directly interpretable as a retained fraction of prefusion signal.
+            """
             log_vals = np.log1p(vals)
             pos = log_vals >= thr_log
             n_pos = int(np.sum(pos))
             f_plus = (n_pos / vals.size) if vals.size else 0.0
             gmfi_pos = _mfi_fn(vals[pos]) if n_pos else 0.0
             pri_abs = f_plus * gmfi_pos
-            if ref_abs0 is not None:
-                pri_norm = (pri_abs / ref_abs0) if np.isfinite(pri_abs) else np.nan
+            if base_abs0 is not None and np.isfinite(base_abs0) and base_abs0 > 0:
+                pri_norm = (pri_abs / base_abs0) if np.isfinite(pri_abs) else np.nan
             else:
-                gmfi_norm = ((gmfi_pos / gmfi0) if (n_pos and np.isfinite(gmfi0) and gmfi0 > 0)
-                             else (0.0 if not n_pos else np.nan))
-                pri_norm = (f_plus * gmfi_norm) if np.isfinite(gmfi_norm) else np.nan
+                pri_norm = np.nan
             return pri_abs, pri_norm, n_pos
 
         # 2. Reference baseline (e.g. this plate's Wild-Type at t0)
@@ -1871,7 +1888,7 @@ class FlowExperiment:
                     print(f"⚠️ Baseline time {baseline_time} missing for reference '{reference_sample}'{scope}. Self-normalizing.")
                 else:
                     ref_vals = _coerce_nonneg(ref_sub[channel]).values
-                    ref_pri_abs0 = _pri_from_vals(ref_vals, np.nan, None)[0]
+                    ref_pri_abs0 = _pri_from_vals(ref_vals, None)[0]
                     if not np.isfinite(ref_pri_abs0) or ref_pri_abs0 <= 0:
                         print(f"⚠️ Invalid baseline PRI for reference '{reference_sample}'{scope}. Self-normalizing.")
                         ref_pri_abs0 = None
@@ -1887,20 +1904,23 @@ class FlowExperiment:
                 continue
             vals_by_time = {t: _coerce_nonneg(g[channel]).values for t, g in sub.groupby("time")}
 
+            # Normalization denominator for this sample: the reference's baseline
+            # PRI_abs (reference mode) or, failing that, the sample's own baseline
+            # PRI_abs (self mode). Both give PRI_norm == 1 at the baseline.
             if baseline_time not in vals_by_time:
                 warnings.warn(
                     f"Sample '{s}'{scope} has no baseline time {baseline_time}; "
                     f"self-normalized PRI_norm will be NaN for it.",
                     UserWarning, stacklevel=3,
                 )
-                gmfi0 = np.nan
+                self_abs0 = np.nan
             else:
-                t0v = vals_by_time[baseline_time]
-                gmfi0 = _mfi_fn(t0v[np.log1p(t0v) >= thr_log]) if t0v.size else np.nan
+                self_abs0 = _pri_from_vals(vals_by_time[baseline_time], None)[0]
+            base0 = ref_pri_abs0 if ref_pri_abs0 is not None else self_abs0
 
             for t in sorted(vals_by_time):
                 vals = vals_by_time[t]
-                PRI_abs, PRI_norm, n_pos = _pri_from_vals(vals, gmfi0, ref_pri_abs0)
+                PRI_abs, PRI_norm, n_pos = _pri_from_vals(vals, base0)
                 row = dict(sample=s, time=float(t), PRI_abs=PRI_abs, PRI_norm=PRI_norm,
                            n_events=len(vals), n_positive=n_pos)
 
@@ -1909,7 +1929,7 @@ class FlowExperiment:
                     boot_abs, boot_norm = np.empty(n_bootstrap), np.empty(n_bootstrap)
                     for b in range(n_bootstrap):
                         bv = vals[rng.integers(0, len(vals), len(vals))]
-                        boot_abs[b], boot_norm[b], _ = _pri_from_vals(bv, gmfi0, ref_pri_abs0)
+                        boot_abs[b], boot_norm[b], _ = _pri_from_vals(bv, base0)
                     row['PRI_abs_ci_low'] = float(np.nanpercentile(boot_abs, alpha * 100))
                     row['PRI_abs_ci_high'] = float(np.nanpercentile(boot_abs, (1 - alpha) * 100))
                     row['PRI_abs_se'] = float(np.nanstd(boot_abs, ddof=1))
@@ -1928,7 +1948,15 @@ class FlowExperiment:
 
     @staticmethod
     def _add_ddg(fits_norm: pd.DataFrame, wt_sample, temperature_c, scope=""):
-        """Append ΔΔG‡ (kinetic, kcal/mol) via TST: ΔΔG‡ = R·T·ln(t½ / t½_wt)."""
+        """Append ΔΔG‡ (kinetic, kcal/mol) via TST: ΔΔG‡ = R·T·ln(t½ / t½_wt).
+
+        Caveat on ``ddG_kin_err``: the error is propagated treating t½(mutant) and
+        t½(WT) as *independent*. They are not — every sample shares one global
+        baseline ``C`` from a single joint fit, so their half-lives are correlated,
+        and the joint covariance term is not currently tracked. The reported error is
+        therefore an approximation (it also carries the WT's own error as a floor on
+        every row). Treat ΔΔG‡ error bars as indicative, not exact.
+        """
         if wt_sample is None:
             return fits_norm
         _R_KCAL = 0.001987204258  # kcal / (mol·K)
@@ -1992,11 +2020,14 @@ class FlowExperiment:
             times_list_all.append(g['time'].values)
             values_list_all.append(g[which].values)
 
-        # Skip samples with fewer than 3 time points — fitting is degenerate
+        # Skip samples with fewer than 3 *finite* data points — fitting A, k (+ the
+        # shared C) is degenerate below that. Counting finite points (not just time
+        # points) also covers samples whose PRI is undefined, e.g. a control with no
+        # positive events at baseline gives an all-NaN self-normalized PRI_norm.
         skipped = []
         samples, times_list, values_list = [], [], []
         for s, t, v in zip(all_samples, times_list_all, values_list_all):
-            if len(t) < 3:
+            if int(np.sum(np.isfinite(v))) < 3:
                 skipped.append(s)
             else:
                 samples.append(s)
@@ -2084,7 +2115,16 @@ class FlowExperiment:
         # Per-point fit weights (1/standard-error). Prefer bootstrap SE columns when
         # available; otherwise fall back to relative (1/|y|) weighting so the fit is
         # scale-robust even without bootstrap. NaN/inf points get zero weight.
+        #
+        # Weights are capped WITHIN each sample at ``_WEIGHT_CAP_FACTOR × median``
+        # of that sample's finite weights. An anomalously small bootstrap SE (or a
+        # near-zero |y| in the fallback path) would otherwise blow the weight up and
+        # let a single time-point dominate the whole shared-C fit — the exact bias the
+        # weighting was introduced to remove. Capping per-sample (not globally)
+        # preserves the intended cross-sample scaling: a dim sample keeps its overall
+        # high relative weight, only its own internal outliers are tamed.
         se_col = f"{which}_se"
+        weights_absolute = se_col in df_source.columns  # SE-derived → absolute σ
         weights_list = []
         for s, tt, yy in zip(samples, times_list, values_list):
             if se_col in df_source.columns:
@@ -2096,6 +2136,10 @@ class FlowExperiment:
             _rel = 1.0 / np.maximum(np.abs(yy), 1e-9)
             _w = np.where(np.isfinite(_w), _w, _rel)
             _w = np.where(np.isfinite(yy), _w, 0.0)  # drop non-finite y from the fit
+            _pos = _w[np.isfinite(_w) & (_w > 0)]
+            if _pos.size:
+                _cap = _WEIGHT_CAP_FACTOR * float(np.median(_pos))
+                _w = np.minimum(_w, _cap)
             weights_list.append(_w)
 
         initial_params, bounds_lower, bounds_upper = [C0], [0.0], [1.0 if which == 'PRI_norm' else np.inf]
@@ -2117,23 +2161,47 @@ class FlowExperiment:
         res = least_squares(residuals, initial_params, bounds=(bounds_lower, bounds_upper), method='trf')
         global_C = res.x[0]
 
-        # Parameter standard error estimation via Jacobian pseudo-inverse
-        J = res.jac
-        JTJ = J.T @ J
-        if np.linalg.matrix_rank(JTJ) < len(res.x):
-            warnings.warn(
-                "Jacobian rank deficiency detected; covariance estimation may be unreliable.",
-                FitConvergenceWarning, stacklevel=3
-            )
-
-        dof = max(len(res.fun) - len(res.x), 1)
-        mse = (res.fun ** 2).sum() / dof
-
+        # --- Parameter covariance from the SVD of the Jacobian ---
+        # Working with J directly (never JᵀJ) avoids squaring the condition number,
+        # which was the source of the tiny-negative "variances" that produced
+        # `invalid value encountered in sqrt` and NaN errors. Singular values below a
+        # numerical threshold are treated as unresolved directions; the parameters
+        # they involve are reported as inf (unidentifiable), never as a spurious 0
+        # or a negative variance.
+        #
+        # Scaling (fix): when the weights are genuine standard errors (bootstrap SE
+        # columns present) they carry absolute meaning, so the covariance is used
+        # as-is (absolute_sigma). With the relative 1/|y| fallback the weights are
+        # known only up to a global scale, so the covariance is rescaled by the
+        # reduced-χ² (mse), matching scipy.optimize.curve_fit's default.
+        J = np.atleast_2d(res.jac)
+        n_par = len(res.x)
         try:
-            cov = mse * np.linalg.pinv(JTJ)
-            param_errors = np.sqrt(np.diag(cov))
+            _, s_vals, Vh = np.linalg.svd(J, full_matrices=False)
+            eps_thresh = np.finfo(float).eps * max(J.shape) * (s_vals[0] if s_vals.size else 0.0)
+            rank_deficient = np.any(s_vals <= eps_thresh)
+            s_inv2 = np.where(s_vals > eps_thresh, 1.0 / np.where(s_vals > eps_thresh, s_vals, 1.0) ** 2, 0.0)
+            cov0 = (Vh.T * s_inv2) @ Vh  # PSD pseudo-inverse of JᵀJ, no negatives
+            if weights_absolute:
+                cov = cov0
+            else:
+                dof = max(len(res.fun) - n_par, 1)
+                mse = float((res.fun ** 2).sum() / dof)
+                cov = cov0 * mse
+            var = np.clip(np.diag(cov).astype(float), 0.0, np.inf)  # kill round-off negatives
+            # Parameters with an ~zero Jacobian column (e.g. pinned at a bound) are
+            # unidentifiable → report inf rather than a falsely-precise 0.
+            col_norms = np.linalg.norm(J, axis=0)
+            var[col_norms <= eps_thresh] = np.inf
+            param_errors = np.sqrt(var)
+            if rank_deficient:
+                warnings.warn(
+                    "Jacobian rank deficiency detected; some parameter errors are "
+                    "reported as inf (unidentifiable).",
+                    FitConvergenceWarning, stacklevel=3
+                )
         except Exception as cov_err:
-            param_errors = np.full_like(res.x, np.nan)
+            param_errors = np.full(n_par, np.nan)
             warnings.warn(
                 f"Covariance estimation failed; parameter errors set to NaN. Detail: {cov_err}",
                 FitConvergenceWarning, stacklevel=3

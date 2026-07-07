@@ -46,7 +46,9 @@ This is a **single-file scientific library** — all code lives in `thermoflow_a
 `run_pri_analysis(channel, control_sample, pop_name='raw')` fits a global exponential decay model to median fluorescence vs. time per sample. Produces:
 - `pri_table` — per-well medians
 - `pri_fits_norm` / `pri_fits_abs` — per-sample fit params (`A`, `k`, `t_half`, `r2`, `fit_quality`, bootstrap CIs)
-- `fit_quality` is `'good'`, `'poor'`, or `'insufficient_data'` (< 3 time points triggers a `UserWarning`)
+- `fit_quality` is `'good'`, `'poor'`, or `'insufficient_data'` (< 3 **finite** PRI points triggers a `UserWarning`)
+
+`PRI_norm` is always `PRI_abs(t) / PRI_abs(t₀)` (baseline = 1). The denominator is the `reference_sample`'s baseline `PRI_abs` when given, else the sample's own baseline `PRI_abs` (self mode). Both modes are the same ratio form — do not reintroduce the old `f₊·MFI/MFI₀` self-mode formula (it started at `f₊(t₀)`, not 1, and was not comparable to reference mode).
 
 ### Plotting globals
 
@@ -81,4 +83,7 @@ Key design decisions:
 - **Asymmetric error bars** — to clip lower caps at zero without touching upper caps, pass `yerr=np.array([lower_arr, upper_arr])` to matplotlib bar/errorbar.
 - **Interactive backend in `.py` files** — `%matplotlib widget` is a notebook magic and cannot go in a `.py` file. The programmatic equivalent is `get_ipython().run_line_magic('matplotlib', 'widget')`; requires `ipympl` installed in the environment.
 - **Global C in PRI fit** — `_fit_global_exponential` fits a single shared baseline `C` across all samples simultaneously via `least_squares`. Per-sample free params are `A` and `k` only. Changing this would break the global-fit design.
+- **Fit covariance is SVD-based, not `pinv(JᵀJ)`** — parameter errors come from the SVD of the Jacobian `J` directly (forming `JᵀJ` squares the condition number and yields negative variances / NaN errors when a param is pinned at a bound). Unidentifiable params report `inf`. Covariance is rescaled by reduced-χ² **only** in the relative `1/|y|` fallback; when bootstrap SE columns weight the fit it's absolute-σ (no rescale).
+- **Fit weights are capped per-sample** at `_WEIGHT_CAP_FACTOR × median` (10×) so one well with an anomalously tiny SE can't dominate the shared-`C` fit. Cap is per-sample to preserve intended cross-sample scaling.
+- **Bootstrap CIs are within-well only** — they resample events within each well, capturing MFI sampling noise but not replicate/biological variance. `ddG_kin_err` treats mutant/WT t½ as independent (they're correlated through the shared `C`).
 - **Gate coordinates are in log1p space** — `threshold_log` and all gate boundaries stored in `RectangleGate`/`PolygonGate`/etc. are in `log1p(raw_value)` space, matching what histogram/density plots show on their axes.
